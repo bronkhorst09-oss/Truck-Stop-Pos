@@ -13,9 +13,18 @@
     { id: "account-demo", name: "Account Customer", type: "account", phone: "", email: "", vehicle: "", openingBalance: 0 }
   ];
 
+  const storageKeys = [
+    "truck-pos-products",
+    "truck-pos-transactions",
+    "truck-pos-payments",
+    "truck-pos-customers",
+    "truck-pos-settings",
+    "truck-pos-meta"
+  ];
   const serverData = window.__POS_DATA__ || {};
   const localBackup = readJson("truck-pos-backup", {});
-  const initialData = selectInitialData(serverData, localBackup);
+  const localSnapshot = buildLocalSnapshot();
+  const initialData = mergeSnapshots(serverData, mergeSnapshots(localBackup, localSnapshot));
   const state = {
     products: migrateProducts(load("truck-pos-products", defaultProducts)),
     transactions: load("truck-pos-transactions", []),
@@ -151,8 +160,61 @@
     return Date.parse(snapshot?.["truck-pos-meta"]?.lastSavedAt || "") || 0;
   }
 
-  function selectInitialData(primarySnapshot, backupSnapshot) {
-    return snapshotTimestamp(backupSnapshot) > snapshotTimestamp(primarySnapshot) ? backupSnapshot : primarySnapshot;
+  function buildLocalSnapshot() {
+    const snapshot = {};
+    storageKeys.forEach((key) => {
+      const value = readJson(key, undefined);
+      if (typeof value !== "undefined") snapshot[key] = value;
+    });
+    return snapshot;
+  }
+
+  function cloneValue(value, fallback) {
+    return Array.isArray(value) ? value.map((item) => ({ ...item })) : (value ? { ...value } : fallback);
+  }
+
+  function uniqueById(list) {
+    const seen = new Set();
+    return list.filter((item) => {
+      const key = item?.id || JSON.stringify(item);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  function mergeList(newerList, olderList) {
+    return uniqueById([...(Array.isArray(newerList) ? newerList : []), ...(Array.isArray(olderList) ? olderList : [])]);
+  }
+
+  function pickValue(primaryValue, secondaryValue, fallback) {
+    if (Array.isArray(primaryValue) && primaryValue.length) return cloneValue(primaryValue, fallback);
+    if (primaryValue && !Array.isArray(primaryValue)) return cloneValue(primaryValue, fallback);
+    if (Array.isArray(secondaryValue) && secondaryValue.length) return cloneValue(secondaryValue, fallback);
+    if (secondaryValue && !Array.isArray(secondaryValue)) return cloneValue(secondaryValue, fallback);
+    return fallback;
+  }
+
+  function mergeSnapshots(firstSnapshot, secondSnapshot) {
+    const first = firstSnapshot || {};
+    const second = secondSnapshot || {};
+    const firstTime = snapshotTimestamp(first);
+    const secondTime = snapshotTimestamp(second);
+    const newer = firstTime >= secondTime ? first : second;
+    const older = newer === first ? second : first;
+    const latestTime = Math.max(firstTime, secondTime);
+    return {
+      "truck-pos-products": pickValue(newer["truck-pos-products"], older["truck-pos-products"], defaultProducts),
+      "truck-pos-transactions": mergeList(newer["truck-pos-transactions"], older["truck-pos-transactions"]),
+      "truck-pos-payments": mergeList(newer["truck-pos-payments"], older["truck-pos-payments"]),
+      "truck-pos-customers": mergeList(newer["truck-pos-customers"], older["truck-pos-customers"]),
+      "truck-pos-settings": pickValue(newer["truck-pos-settings"], older["truck-pos-settings"], {}),
+      "truck-pos-meta": {
+        ...(older["truck-pos-meta"] || {}),
+        ...(newer["truck-pos-meta"] || {}),
+        lastSavedAt: latestTime ? new Date(latestTime).toISOString() : (newer["truck-pos-meta"]?.lastSavedAt || older["truck-pos-meta"]?.lastSavedAt || null)
+      }
+    };
   }
 
   function load(key, fallback) {
@@ -1074,13 +1136,17 @@
   }
 
   function init() {
-    if (!state.settings.currency || state.settings.currency === "$") state.settings.currency = "R";
-    void saveAll().catch(() => {});
+    let normalized = false;
+    if (!state.settings.currency || state.settings.currency === "$") {
+      state.settings.currency = "R";
+      normalized = true;
+    }
     bindEvents();
     renderAll();
     tickClock();
     setInterval(tickClock, 30000);
     els.pinInput.focus();
+    if (normalized) void saveAll().catch(() => {});
     window.addEventListener("beforeunload", () => {
       const data = currentData();
       try {
