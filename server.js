@@ -161,7 +161,10 @@ async function initDatabaseWithRetry() {
       return;
     } catch (error) {
       console.error(`Database connection attempt ${attempt}/${attempts} failed:`, error.message);
-      if (attempt === attempts) throw error;
+      if (attempt === attempts) {
+        console.error("Database unavailable. Starting with local file storage fallback.");
+        return;
+      }
       await new Promise((resolve) => setTimeout(resolve, attempt * 2500));
     }
   }
