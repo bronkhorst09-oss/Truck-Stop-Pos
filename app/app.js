@@ -1,0 +1,1147 @@
+(function () {
+  const categories = ["All", "Fuel", "Food", "Drinks", "Truck", "Service"];
+  const editableCategories = categories.filter((category) => category !== "All");
+  const paymentMethods = ["Cash", "Card", "Fleet", "Account"];
+
+  const defaultProducts = [
+    { id: "diesel", name: "Diesel 50PPM", category: "Fuel", price: 28.68, unit: "L", stock: 9999, sku: "FUEL-D50", taxable: false },
+    { id: "def", name: "DEF Fluid", category: "Truck", price: 16.99, unit: "box", stock: 18, sku: "TRK-DEF", taxable: true },
+    { id: "oil", name: "15W-40 Oil", category: "Truck", price: 31.5, unit: "gal", stock: 12, sku: "TRK-OIL", taxable: true },
+    { id: "washer", name: "Washer Fluid", category: "Truck", price: 4.99, unit: "jug", stock: 30, sku: "TRK-WASH", taxable: true },
+    { id: "shower", name: "Driver Shower", category: "Service", price: 15, unit: "each", stock: 999, sku: "SVC-SHOWER", taxable: true },
+    { id: "parking", name: "Overnight Parking", category: "Service", price: 25, unit: "night", stock: 999, sku: "SVC-PARK", taxable: true },
+    { id: "scale", name: "CAT Scale Ticket", category: "Service", price: 13.5, unit: "each", stock: 999, sku: "SVC-SCALE", taxable: true },
+    { id: "coffee", name: "Large Coffee", category: "Drinks", price: 2.49, unit: "cup", stock: 80, sku: "DRK-COF", taxable: true },
+    { id: "water", name: "Bottled Water", category: "Drinks", price: 1.79, unit: "each", stock: 120, sku: "DRK-WAT", taxable: true },
+    { id: "energy", name: "Energy Drink", category: "Drinks", price: 3.99, unit: "can", stock: 48, sku: "DRK-ENG", taxable: true },
+    { id: "burger", name: "Hot Burger", category: "Food", price: 7.99, unit: "each", stock: 24, sku: "FOO-BUR", taxable: true },
+    { id: "sandwich", name: "Deli Sandwich", category: "Food", price: 6.49, unit: "each", stock: 21, sku: "FOO-SAN", taxable: true },
+    { id: "chips", name: "Chips", category: "Food", price: 2.19, unit: "bag", stock: 65, sku: "FOO-CHI", taxable: true },
+    { id: "candy", name: "Candy Bar", category: "Food", price: 1.89, unit: "each", stock: 75, sku: "FOO-CAN", taxable: true }
+  ];
+
+  const defaultCustomers = [
+    { id: "walkin", name: "Walk-in Prepaid", type: "prepaid", phone: "", email: "", vehicle: "", openingBalance: 0 },
+    { id: "account-demo", name: "Account Customer", type: "account", phone: "", email: "", vehicle: "", openingBalance: 0 }
+  ];
+
+  const serverData = window.__POS_DATA__ || {};
+  const usingSharedServer = window.location.protocol === "http:" && !window.location.hostname.includes("127.0.0.1");
+
+  const state = {
+    products: migrateProducts(load("truck-pos-products", defaultProducts)),
+    transactions: load("truck-pos-transactions", []),
+    payments: load("truck-pos-payments", []),
+    customers: migrateCustomers(load("truck-pos-customers", defaultCustomers)),
+    settings: {
+      storeName: "Highway Truck Stop",
+      currency: "R",
+      footer: "Drive safe. Thank you.",
+      taxRate: 15,
+      adminPin: "1234",
+      staffPin: "0000",
+      recoveryPin: "9999",
+      ...load("truck-pos-settings", {})
+    },
+    cart: [],
+    category: "All",
+    search: "",
+    paymentMethod: "Cash",
+    currentUser: null,
+    selectedCustomerId: ""
+  };
+
+  const els = {
+    loginScreen: document.querySelector("#loginScreen"),
+    loginForm: document.querySelector("#loginForm"),
+    pinInput: document.querySelector("#pinInput"),
+    loginMessage: document.querySelector("#loginMessage"),
+    recoveryBtn: document.querySelector("#recoveryBtn"),
+    appShell: document.querySelector("#appShell"),
+    screenTitle: document.querySelector("#screenTitle"),
+    roleBadge: document.querySelector("#roleBadge"),
+    logoutBtn: document.querySelector("#logoutBtn"),
+    categoryTabs: document.querySelector("#categoryTabs"),
+    productGrid: document.querySelector("#productGrid"),
+    searchInput: document.querySelector("#searchInput"),
+    clearSearchBtn: document.querySelector("#clearSearchBtn"),
+    saleCustomerSelect: document.querySelector("#saleCustomerSelect"),
+    saleRuleMessage: document.querySelector("#saleRuleMessage"),
+    cartLines: document.querySelector("#cartLines"),
+    cartCount: document.querySelector("#cartCount"),
+    subtotal: document.querySelector("#subtotal"),
+    taxAmount: document.querySelector("#taxAmount"),
+    total: document.querySelector("#total"),
+    paymentTabs: document.querySelector("#paymentTabs"),
+    payBtn: document.querySelector("#payBtn"),
+    voidBtn: document.querySelector("#voidBtn"),
+    receiptDialog: document.querySelector("#receiptDialog"),
+    receiptText: document.querySelector("#receiptText"),
+    closeReceiptBtn: document.querySelector("#closeReceiptBtn"),
+    printReceiptBtn: document.querySelector("#printReceiptBtn"),
+    newSaleBtn: document.querySelector("#newSaleBtn"),
+    historyDialog: document.querySelector("#historyDialog"),
+    historyList: document.querySelector("#historyList"),
+    historyBtn: document.querySelector("#historyBtn"),
+    closeHistoryBtn: document.querySelector("#closeHistoryBtn"),
+    historyFromInput: document.querySelector("#historyFromInput"),
+    historyToInput: document.querySelector("#historyToInput"),
+    historyStatusInput: document.querySelector("#historyStatusInput"),
+    downloadSelectedHistoryBtn: document.querySelector("#downloadSelectedHistoryBtn"),
+    downloadAllHistoryBtn: document.querySelector("#downloadAllHistoryBtn"),
+    customersDialog: document.querySelector("#customersDialog"),
+    customersBtn: document.querySelector("#customersBtn"),
+    closeCustomersBtn: document.querySelector("#closeCustomersBtn"),
+    addCustomerForm: document.querySelector("#addCustomerForm"),
+    customerNameInput: document.querySelector("#customerNameInput"),
+    customerTypeInput: document.querySelector("#customerTypeInput"),
+    customerPhoneInput: document.querySelector("#customerPhoneInput"),
+    customerEmailInput: document.querySelector("#customerEmailInput"),
+    customerVehicleInput: document.querySelector("#customerVehicleInput"),
+    customerOpeningBalanceInput: document.querySelector("#customerOpeningBalanceInput"),
+    customersList: document.querySelector("#customersList"),
+    paymentsDialog: document.querySelector("#paymentsDialog"),
+    paymentsBtn: document.querySelector("#paymentsBtn"),
+    closePaymentsBtn: document.querySelector("#closePaymentsBtn"),
+    paymentForm: document.querySelector("#paymentForm"),
+    paymentCustomerSelect: document.querySelector("#paymentCustomerSelect"),
+    paymentAmountInput: document.querySelector("#paymentAmountInput"),
+    paymentMethodInput: document.querySelector("#paymentMethodInput"),
+    paymentReferenceInput: document.querySelector("#paymentReferenceInput"),
+    paymentNotesInput: document.querySelector("#paymentNotesInput"),
+    paymentsList: document.querySelector("#paymentsList"),
+    statementsDialog: document.querySelector("#statementsDialog"),
+    statementsBtn: document.querySelector("#statementsBtn"),
+    closeStatementsBtn: document.querySelector("#closeStatementsBtn"),
+    statementCustomerSelect: document.querySelector("#statementCustomerSelect"),
+    statementFromInput: document.querySelector("#statementFromInput"),
+    statementToInput: document.querySelector("#statementToInput"),
+    statementPreview: document.querySelector("#statementPreview"),
+    downloadCsvBtn: document.querySelector("#downloadCsvBtn"),
+    downloadPdfBtn: document.querySelector("#downloadPdfBtn"),
+    inventoryDialog: document.querySelector("#inventoryDialog"),
+    inventoryList: document.querySelector("#inventoryList"),
+    inventoryBtn: document.querySelector("#inventoryBtn"),
+    closeInventoryBtn: document.querySelector("#closeInventoryBtn"),
+    addItemForm: document.querySelector("#addItemForm"),
+    newItemName: document.querySelector("#newItemName"),
+    newItemCategory: document.querySelector("#newItemCategory"),
+    newItemPrice: document.querySelector("#newItemPrice"),
+    newItemUnit: document.querySelector("#newItemUnit"),
+    newItemStock: document.querySelector("#newItemStock"),
+    newItemSku: document.querySelector("#newItemSku"),
+    newItemTaxable: document.querySelector("#newItemTaxable"),
+    settingsDialog: document.querySelector("#settingsDialog"),
+    settingsBtn: document.querySelector("#settingsBtn"),
+    closeSettingsBtn: document.querySelector("#closeSettingsBtn"),
+    settingsForm: document.querySelector("#settingsForm"),
+    storeNameInput: document.querySelector("#storeNameInput"),
+    currencyInput: document.querySelector("#currencyInput"),
+    taxRateInput: document.querySelector("#taxRateInput"),
+    adminPinInput: document.querySelector("#adminPinInput"),
+    staffPinInput: document.querySelector("#staffPinInput"),
+    recoveryPinInput: document.querySelector("#recoveryPinInput"),
+    footerInput: document.querySelector("#footerInput"),
+    shiftClock: document.querySelector("#shiftClock"),
+    shiftSales: document.querySelector("#shiftSales"),
+    transactionCount: document.querySelector("#transactionCount"),
+    averageTicket: document.querySelector("#averageTicket"),
+    lowStockCount: document.querySelector("#lowStockCount")
+  };
+
+  function load(key, fallback) {
+    if (Object.prototype.hasOwnProperty.call(serverData, key)) {
+      return serverData[key];
+    }
+    try {
+      const saved = localStorage.getItem(key);
+      return saved ? JSON.parse(saved) : fallback;
+    } catch (error) {
+      return fallback;
+    }
+  }
+
+  function save(key, value) {
+    localStorage.setItem(key, JSON.stringify(value));
+  }
+
+  function migrateProducts(products) {
+    return products.map((product) => ({
+      ...product,
+      unit: product.category === "Fuel" ? "L" : product.unit,
+      taxable: typeof product.taxable === "boolean" ? product.taxable : product.category !== "Fuel"
+    }));
+  }
+
+  function migrateCustomers(customers) {
+    const list = customers.length ? customers : defaultCustomers;
+    if (!list.some((customer) => customer.id === "walkin")) {
+      list.unshift(defaultCustomers[0]);
+    }
+    if (!list.some((customer) => customer.type === "account")) {
+      list.push(defaultCustomers[1]);
+    }
+    return list;
+  }
+
+  function saveAll() {
+    const data = currentData();
+    Object.entries(data).forEach(([key, value]) => save(key, value));
+    if (window.location.protocol === "http:") {
+      fetch("/api/data", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+        keepalive: true
+      }).catch(() => {
+        // Browser storage remains as a fallback if the shared server is unreachable.
+      });
+    }
+  }
+
+  function currentData() {
+    return {
+      "truck-pos-products": state.products,
+      "truck-pos-transactions": state.transactions,
+      "truck-pos-payments": state.payments,
+      "truck-pos-customers": state.customers,
+      "truck-pos-settings": state.settings
+    };
+  }
+
+  function money(value) {
+    return `${state.settings.currency}${Number(value || 0).toFixed(2)}`;
+  }
+
+  function uid(prefix) {
+    return `${prefix}${Date.now().toString(36).toUpperCase()}`;
+  }
+
+  function itemId() {
+    return `item-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+  }
+
+  function escapeHtml(value) {
+    return String(value ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+  }
+
+  function categoryOptions(selected) {
+    return editableCategories
+      .map((category) => `<option value="${category}" ${category === selected ? "selected" : ""}>${category}</option>`)
+      .join("");
+  }
+
+  function selectedCustomer() {
+    return state.customers.find((customer) => customer.id === state.selectedCustomerId);
+  }
+
+  function accountCustomers() {
+    return state.customers.filter((customer) => customer.type === "account");
+  }
+
+  function totals() {
+    const subtotal = state.cart.reduce((sum, line) => sum + line.price * line.qty, 0);
+    const taxable = state.cart.reduce((sum, line) => sum + (line.taxable ? line.price * line.qty : 0), 0);
+    const tax = taxable * (Number(state.settings.taxRate || 0) / 100);
+    return { subtotal, tax, total: subtotal + tax };
+  }
+
+  function clampQty(line, qty) {
+    const cleanQty = Number.isFinite(qty) ? qty : 0;
+    return Math.max(0, cleanQty);
+  }
+
+  function allowedPaymentMethods(customer) {
+    if (!customer) return [];
+    return customer.type === "account" ? ["Account"] : ["Cash", "Card", "Fleet"];
+  }
+
+  function login(role) {
+    state.currentUser = role;
+    els.loginScreen.classList.add("hidden");
+    els.appShell.classList.remove("hidden");
+    applyRole();
+    renderAll();
+  }
+
+  function applyRole() {
+    const isAdmin = state.currentUser === "admin";
+    els.roleBadge.textContent = isAdmin ? "Admin" : "Staff";
+    els.screenTitle.textContent = isAdmin ? "Admin Register" : "Staff Register";
+    document.body.classList.toggle("is-admin", isAdmin);
+  }
+
+  function logout() {
+    state.currentUser = null;
+    state.cart = [];
+    state.selectedCustomerId = "";
+    els.pinInput.value = "";
+    els.appShell.classList.add("hidden");
+    els.loginScreen.classList.remove("hidden");
+    renderCart();
+    els.pinInput.focus();
+  }
+
+  function renderAll() {
+    renderTabs();
+    renderCustomersForSale();
+    renderProducts();
+    renderCart();
+    renderMetrics();
+    tickClock();
+  }
+
+  function renderTabs() {
+    els.categoryTabs.innerHTML = categories
+      .map((category) => `<button class="tab-button ${category === state.category ? "active" : ""}" data-category="${category}" type="button">${category}</button>`)
+      .join("");
+    renderPaymentTabs();
+  }
+
+  function renderPaymentTabs() {
+    const customer = selectedCustomer();
+    const allowed = allowedPaymentMethods(customer);
+    if (!allowed.includes(state.paymentMethod)) state.paymentMethod = allowed[0] || "Cash";
+    els.paymentTabs.innerHTML = paymentMethods
+      .map((method) => {
+        const disabled = !allowed.includes(method);
+        return `<button class="pay-method ${method === state.paymentMethod ? "active" : ""}" data-method="${method}" type="button" ${disabled ? "disabled" : ""}>${method}</button>`;
+      })
+      .join("");
+    renderSaleRule();
+  }
+
+  function renderCustomersForSale() {
+    const options = ['<option value="">Select customer...</option>']
+      .concat(state.customers.map((customer) => `<option value="${customer.id}" ${customer.id === state.selectedCustomerId ? "selected" : ""}>${escapeHtml(customer.name)} (${customer.type === "account" ? "Account" : "Prepaid"})</option>`));
+    els.saleCustomerSelect.innerHTML = options.join("");
+  }
+
+  function renderSaleRule() {
+    const customer = selectedCustomer();
+    if (!customer) {
+      els.saleRuleMessage.textContent = "Select a customer before completing the sale.";
+      return;
+    }
+    els.saleRuleMessage.textContent = customer.type === "account"
+      ? "Account customer: only Account payment is allowed."
+      : "Prepaid customer: Cash, Card, or Fleet only.";
+  }
+
+  function renderProducts() {
+    const query = state.search.trim().toLowerCase();
+    const products = state.products.filter((product) => {
+      const inCategory = state.category === "All" || product.category === state.category;
+      const matches = [product.name, product.category, product.sku].join(" ").toLowerCase().includes(query);
+      return inCategory && matches;
+    });
+    els.productGrid.innerHTML = products.length ? products.map(productTemplate).join("") : '<div class="empty-state">No matching items.</div>';
+  }
+
+  function productTemplate(product) {
+    const stockLabel = product.stock > 900 ? "Open" : `${product.stock} left`;
+    const taxLabel = product.taxable ? `${state.settings.taxRate}% VAT` : "No VAT";
+    return `
+      <button class="product-button" data-product="${product.id}" type="button">
+        <span class="category-chip">${product.category}</span>
+        <strong>${escapeHtml(product.name)}</strong>
+        <span class="product-meta"><span>${escapeHtml(product.sku)}</span><span>${money(product.price)} / ${escapeHtml(product.unit)}</span></span>
+        <span class="product-meta"><span>${stockLabel}</span><span>${taxLabel}</span></span>
+      </button>
+    `;
+  }
+
+  function addToCart(productId) {
+    const product = state.products.find((item) => item.id === productId);
+    if (!product) return;
+    const existing = state.cart.find((line) => line.id === productId);
+    if (existing) {
+      existing.qty = clampQty(existing, existing.qty + 1);
+    } else {
+      state.cart.push({
+        id: product.id,
+        name: product.name,
+        category: product.category,
+        price: product.price,
+        unit: product.unit,
+        taxable: product.taxable,
+        qty: ""
+      });
+    }
+    renderCart();
+    focusNewestQty(productId);
+  }
+
+  function focusNewestQty(productId) {
+    const input = els.cartLines.querySelector(`[data-qty="${CSS.escape(productId)}"]`);
+    if (input) {
+      input.focus();
+      input.select();
+    }
+  }
+
+  function updateQty(productId, delta) {
+    const line = state.cart.find((item) => item.id === productId);
+    if (!line) return;
+    line.qty = clampQty(line, Number(line.qty || 0) + delta);
+    if (line.qty <= 0) state.cart = state.cart.filter((item) => item.id !== productId);
+    renderCart();
+  }
+
+  function setQty(productId, qty) {
+    const line = state.cart.find((item) => item.id === productId);
+    if (!line) return;
+    line.qty = qty === "" ? "" : clampQty(line, Number(qty));
+    if (line.category === "Fuel" && line.qty !== "") line.qty = Math.round(line.qty * 10) / 10;
+  }
+
+  function validCart() {
+    return state.cart.length && state.cart.every((line) => Number(line.qty) > 0);
+  }
+
+  function renderCart() {
+    renderCartCount();
+    els.cartLines.innerHTML = state.cart.length ? state.cart.map(lineTemplate).join("") : '<div class="empty-state">Tap an item to start a sale.</div>';
+    renderCartTotals();
+  }
+
+  function renderCartCount() {
+    const fuelLiters = state.cart.filter((line) => line.category === "Fuel").reduce((sum, line) => sum + Number(line.qty || 0), 0);
+    const itemCount = state.cart.reduce((sum, line) => sum + Number(line.qty || 0), 0);
+    const lineCount = state.cart.length;
+    els.cartCount.textContent = fuelLiters
+      ? `${lineCount} ${lineCount === 1 ? "line" : "lines"} / ${fuelLiters.toLocaleString()} L`
+      : `${itemCount} ${itemCount === 1 ? "item" : "items"}`;
+  }
+
+  function renderCartTotals() {
+    const currentTotals = totals();
+    const customer = selectedCustomer();
+    const allowed = allowedPaymentMethods(customer);
+    els.subtotal.textContent = money(currentTotals.subtotal);
+    els.taxAmount.textContent = money(currentTotals.tax);
+    els.total.textContent = money(currentTotals.total);
+    els.payBtn.disabled = !validCart() || !customer || !allowed.includes(state.paymentMethod);
+    renderMetrics();
+  }
+
+  function lineTemplate(line) {
+    const qtyLabel = line.category === "Fuel" ? "L" : line.unit;
+    const itemControls = line.category === "Fuel" ? "" : `
+      <div class="qty-controls">
+        <button data-minus="${line.id}" type="button" title="Decrease">-</button>
+        <button data-plus="${line.id}" type="button" title="Increase">+</button>
+      </div>
+    `;
+    return `
+      <div class="cart-line">
+        <div>
+          <div class="cart-name">${escapeHtml(line.name)}</div>
+          <div class="cart-detail">${line.qty || 0} ${escapeHtml(qtyLabel)} x ${money(line.price)} ${line.taxable ? "incl. VAT calc" : "no VAT"}</div>
+          <label class="fuel-liters-control">
+            <span>${line.category === "Fuel" ? "Liters" : "Qty"}</span>
+            <input data-qty="${line.id}" type="number" min="0" step="${line.category === "Fuel" ? "0.1" : "1"}" value="${line.qty}" placeholder="Type amount" />
+          </label>
+        </div>
+        <div>
+          <strong data-line-total="${line.id}">${money(Number(line.qty || 0) * line.price)}</strong>
+          ${itemControls}
+        </div>
+      </div>
+    `;
+  }
+
+  function updateManualQty(input) {
+    const productId = input.dataset.qty;
+    setQty(productId, input.value);
+    const line = state.cart.find((item) => item.id === productId);
+    if (!line) {
+      renderCart();
+      return;
+    }
+    input.value = line.qty;
+    const totalEl = els.cartLines.querySelector(`[data-line-total="${CSS.escape(productId)}"]`);
+    if (totalEl) totalEl.textContent = money(Number(line.qty || 0) * line.price);
+    renderCartCount();
+    renderCartTotals();
+  }
+
+  function completeSale() {
+    const customer = selectedCustomer();
+    const allowed = allowedPaymentMethods(customer);
+    if (!validCart() || !customer || !allowed.includes(state.paymentMethod)) {
+      renderCartTotals();
+      return;
+    }
+    const currentTotals = totals();
+    const transaction = {
+      id: uid("S"),
+      type: "sale",
+      status: "active",
+      date: new Date().toISOString(),
+      userRole: state.currentUser,
+      customerId: customer.id,
+      customerName: customer.name,
+      customerType: customer.type,
+      paymentMethod: state.paymentMethod,
+      lines: state.cart.map((line) => ({ ...line, qty: Number(line.qty) })),
+      totals: currentTotals
+    };
+    transaction.lines.forEach((line) => {
+      const product = state.products.find((item) => item.id === line.id);
+      if (product && product.stock < 9000) product.stock = Math.max(0, product.stock - line.qty);
+    });
+    state.transactions.unshift(transaction);
+    saveAll();
+    els.receiptText.textContent = receipt(transaction);
+    els.receiptDialog.showModal();
+    renderProducts();
+    renderMetrics();
+  }
+
+  function receipt(transaction) {
+    const lines = transaction.lines.map((line) => {
+      const left = `${line.name} ${line.qty} ${line.unit}`;
+      return `${left.padEnd(28, " ")}${money(line.price * line.qty).padStart(10, " ")}`;
+    }).join("\n");
+    return [
+      state.settings.storeName,
+      "Truck Stop POS",
+      `Receipt ${transaction.id}`,
+      new Date(transaction.date).toLocaleString(),
+      `Customer: ${transaction.customerName}`,
+      "-".repeat(40),
+      lines,
+      "-".repeat(40),
+      row("Subtotal", transaction.totals.subtotal),
+      row("VAT", transaction.totals.tax),
+      row("Total", transaction.totals.total),
+      `Payment: ${transaction.paymentMethod}`,
+      "",
+      state.settings.footer
+    ].join("\n");
+  }
+
+  function row(label, value) {
+    return `${label.padEnd(28, " ")}${money(value).padStart(10, " ")}`;
+  }
+
+  function resetSale() {
+    state.cart = [];
+    renderCart();
+  }
+
+  function renderMetrics() {
+    const today = new Date().toDateString();
+    const todaysTransactions = state.transactions.filter((transaction) => transaction.status !== "void" && new Date(transaction.date).toDateString() === today);
+    const sales = todaysTransactions.reduce((sum, transaction) => sum + transaction.totals.total, 0);
+    const average = todaysTransactions.length ? sales / todaysTransactions.length : 0;
+    const lowStock = state.products.filter((product) => product.stock < 15).length;
+    els.shiftSales.textContent = `${money(sales)} shift`;
+    els.transactionCount.textContent = todaysTransactions.length;
+    els.averageTicket.textContent = money(average);
+    els.lowStockCount.textContent = lowStock;
+  }
+
+  function renderHistory() {
+    const transactions = filteredHistory();
+    els.historyList.innerHTML = transactions.length
+      ? transactions.map((transaction) => `
+          <div class="record ${transaction.status === "void" ? "void-record" : ""}">
+            <div class="record-top"><span>${transaction.id}</span><span>${money(transaction.totals.total)}</span></div>
+            <div class="muted">${new Date(transaction.date).toLocaleString()} - ${escapeHtml(transaction.customerName)} - ${transaction.paymentMethod} - ${transaction.status}</div>
+            <div>${transaction.lines.map((line) => `${line.qty} ${line.unit} ${escapeHtml(line.name)}`).join(", ")}</div>
+            ${transaction.status === "void" ? `<div class="muted">Void reason: ${escapeHtml(transaction.voidReason || "")}</div>` : `<div class="record-actions"><button class="danger-button" data-void-sale="${transaction.id}" type="button">Void Sale</button></div>`}
+          </div>
+        `).join("")
+      : '<div class="empty-state">No transactions for this selection.</div>';
+  }
+
+  function filteredHistory() {
+    const fromDate = els.historyFromInput.value;
+    const toDate = els.historyToInput.value;
+    const status = els.historyStatusInput.value;
+    return state.transactions.filter((transaction) => {
+      const date = transaction.date.slice(0, 10);
+      const inDateRange = (!fromDate || date >= fromDate) && (!toDate || date <= toDate);
+      const inStatus = status === "all" || transaction.status === status;
+      return inDateRange && inStatus;
+    });
+  }
+
+  function historyRows(transactions) {
+    const rows = [[
+      "Sale ID",
+      "Date",
+      "Status",
+      "Customer",
+      "Customer Type",
+      "Payment Method",
+      "User Role",
+      "Item",
+      "Category",
+      "Qty",
+      "Unit",
+      "Unit Price",
+      "Line Total",
+      "VAT Item",
+      "Sale Subtotal",
+      "Sale VAT",
+      "Sale Total",
+      "Void Reason",
+      "Voided At",
+      "Voided By"
+    ]];
+
+    transactions.forEach((transaction) => {
+      transaction.lines.forEach((line) => {
+        rows.push([
+          transaction.id,
+          new Date(transaction.date).toLocaleString(),
+          transaction.status,
+          transaction.customerName,
+          transaction.customerType,
+          transaction.paymentMethod,
+          transaction.userRole,
+          line.name,
+          line.category,
+          line.qty,
+          line.unit,
+          line.price,
+          Number(line.qty || 0) * Number(line.price || 0),
+          line.taxable ? "Yes" : "No",
+          transaction.totals.subtotal,
+          transaction.totals.tax,
+          transaction.totals.total,
+          transaction.voidReason || "",
+          transaction.voidedAt ? new Date(transaction.voidedAt).toLocaleString() : "",
+          transaction.voidedBy || ""
+        ]);
+      });
+    });
+
+    return rows;
+  }
+
+  function toCsv(rows) {
+    return rows.map((row) => row.map((cell) => `"${String(cell ?? "").replaceAll('"', '""')}"`).join(",")).join("\n");
+  }
+
+  function toExcelWorkbook(rows, title) {
+    const tableRows = rows.map((row, rowIndex) => {
+      const tag = rowIndex === 0 ? "th" : "td";
+      return `<tr>${row.map((cell) => `<${tag}>${escapeHtml(cell)}</${tag}>`).join("")}</tr>`;
+    }).join("");
+
+    return `
+      <!doctype html>
+      <html>
+        <head>
+          <meta charset="utf-8" />
+          <style>
+            table { border-collapse: collapse; font-family: Arial, sans-serif; }
+            th, td { border: 1px solid #999; padding: 6px; white-space: nowrap; }
+            th { background: #e8f2f0; font-weight: bold; }
+          </style>
+        </head>
+        <body>
+          <h2>${escapeHtml(title)}</h2>
+          <table>${tableRows}</table>
+        </body>
+      </html>
+    `;
+  }
+
+  function downloadHistoryExcel(transactions, label) {
+    const workbook = toExcelWorkbook(historyRows(transactions), "Sales History");
+    const today = new Date().toISOString().slice(0, 10);
+    downloadBlob(workbook, `sales-history-${label}-${today}.xls`, "application/vnd.ms-excel");
+  }
+
+  function voidSale(id) {
+    const transaction = state.transactions.find((item) => item.id === id);
+    if (!transaction || transaction.status === "void") return;
+    const reason = window.prompt("Reason for voiding this sale?");
+    if (!reason) return;
+    transaction.status = "void";
+    transaction.voidReason = reason;
+    transaction.voidedAt = new Date().toISOString();
+    transaction.voidedBy = state.currentUser;
+    saveAll();
+    renderHistory();
+    renderMetrics();
+  }
+
+  function renderCustomers() {
+    els.customersList.innerHTML = state.customers.map((customer) => `
+      <form class="record edit-customer-form" data-edit-customer="${customer.id}">
+        <div class="item-form-grid">
+          <label><span>Name</span><input name="name" value="${escapeHtml(customer.name)}" required /></label>
+          <label><span>Type</span><select name="type"><option value="prepaid" ${customer.type === "prepaid" ? "selected" : ""}>Prepaid</option><option value="account" ${customer.type === "account" ? "selected" : ""}>Account</option></select></label>
+          <label><span>Phone</span><input name="phone" value="${escapeHtml(customer.phone || "")}" /></label>
+          <label><span>Email</span><input name="email" value="${escapeHtml(customer.email || "")}" /></label>
+          <label><span>Vehicle</span><input name="vehicle" value="${escapeHtml(customer.vehicle || "")}" /></label>
+          <label><span>Opening Balance</span><input name="openingBalance" type="number" step="0.01" value="${Number(customer.openingBalance || 0).toFixed(2)}" /></label>
+        </div>
+        <div class="record-actions">
+          <button class="secondary-button" type="submit">Save</button>
+          ${customer.id === "walkin" ? "" : `<button class="danger-button" data-delete-customer="${customer.id}" type="button">Remove</button>`}
+        </div>
+      </form>
+    `).join("");
+  }
+
+  function addCustomer() {
+    const name = els.customerNameInput.value.trim();
+    if (!name) return;
+    state.customers.push({
+      id: uid("C"),
+      name,
+      type: els.customerTypeInput.value,
+      phone: els.customerPhoneInput.value.trim(),
+      email: els.customerEmailInput.value.trim(),
+      vehicle: els.customerVehicleInput.value.trim(),
+      openingBalance: Number(els.customerOpeningBalanceInput.value || 0)
+    });
+    els.addCustomerForm.reset();
+    saveAll();
+    renderCustomers();
+    renderCustomersForSale();
+  }
+
+  function saveEditedCustomer(form) {
+    const customer = state.customers.find((item) => item.id === form.dataset.editCustomer);
+    if (!customer) return;
+    customer.name = form.elements.name.value.trim();
+    customer.type = form.elements.type.value;
+    customer.phone = form.elements.phone.value.trim();
+    customer.email = form.elements.email.value.trim();
+    customer.vehicle = form.elements.vehicle.value.trim();
+    customer.openingBalance = Number(form.elements.openingBalance.value || 0);
+    saveAll();
+    renderCustomers();
+    renderCustomersForSale();
+    renderPaymentTabs();
+  }
+
+  function removeCustomer(id) {
+    if (id === "walkin") return;
+    const hasLedger = state.transactions.some((sale) => sale.customerId === id) || state.payments.some((payment) => payment.customerId === id);
+    if (hasLedger) {
+      window.alert("This customer already has sales or payments. Keep them for history.");
+      return;
+    }
+    state.customers = state.customers.filter((customer) => customer.id !== id);
+    saveAll();
+    renderCustomers();
+    renderCustomersForSale();
+  }
+
+  function renderPayments() {
+    const options = accountCustomers().map((customer) => `<option value="${customer.id}">${escapeHtml(customer.name)}</option>`).join("");
+    els.paymentCustomerSelect.innerHTML = options;
+    els.paymentsList.innerHTML = state.payments.length
+      ? state.payments.map((payment) => `
+        <div class="record">
+          <div class="record-top"><span>${escapeHtml(payment.customerName)}</span><span>${money(payment.amount)}</span></div>
+          <div class="muted">${new Date(payment.date).toLocaleString()} - ${escapeHtml(payment.method)} - ${escapeHtml(payment.reference || "")}</div>
+          <div>${escapeHtml(payment.notes || "")}</div>
+        </div>
+      `).join("")
+      : '<div class="empty-state">No payments loaded yet.</div>';
+  }
+
+  function addPayment() {
+    const customer = state.customers.find((item) => item.id === els.paymentCustomerSelect.value);
+    if (!customer || customer.type !== "account") return;
+    state.payments.unshift({
+      id: uid("P"),
+      type: "payment",
+      date: new Date().toISOString(),
+      customerId: customer.id,
+      customerName: customer.name,
+      amount: Number(els.paymentAmountInput.value || 0),
+      method: els.paymentMethodInput.value,
+      reference: els.paymentReferenceInput.value.trim(),
+      notes: els.paymentNotesInput.value.trim(),
+      userRole: state.currentUser
+    });
+    els.paymentForm.reset();
+    saveAll();
+    renderPayments();
+  }
+
+  function ledgerFor(customerId, fromDate, toDate) {
+    const customer = state.customers.find((item) => item.id === customerId);
+    if (!customer) return { customer: null, rows: [], opening: 0, closing: 0 };
+    const rows = [];
+    rows.push({ date: "", description: "Opening balance", debit: Number(customer.openingBalance || 0), credit: 0, ref: "" });
+    state.transactions
+      .filter((sale) => sale.customerId === customerId && sale.paymentMethod === "Account")
+      .forEach((sale) => rows.push({
+        date: sale.date,
+        description: sale.status === "void" ? `VOID ${sale.id}` : `Sale ${sale.id}`,
+        debit: sale.status === "void" ? 0 : sale.totals.total,
+        credit: 0,
+        ref: sale.id
+      }));
+    state.payments
+      .filter((payment) => payment.customerId === customerId)
+      .forEach((payment) => rows.push({ date: payment.date, description: `Payment ${payment.method}`, debit: 0, credit: payment.amount, ref: payment.reference || payment.id }));
+    rows.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    let balance = 0;
+    const filtered = rows.map((row) => {
+      balance += row.debit - row.credit;
+      return { ...row, balance };
+    }).filter((row) => {
+      if (!row.date) return true;
+      const date = row.date.slice(0, 10);
+      return (!fromDate || date >= fromDate) && (!toDate || date <= toDate);
+    });
+    return { customer, rows: filtered, opening: Number(customer.openingBalance || 0), closing: balance };
+  }
+
+  function renderStatement() {
+    const customerId = els.statementCustomerSelect.value;
+    const statement = ledgerFor(customerId, els.statementFromInput.value, els.statementToInput.value);
+    if (!statement.customer) {
+      els.statementPreview.innerHTML = '<div class="empty-state">Select an account customer.</div>';
+      return;
+    }
+    els.statementPreview.innerHTML = statementHtml(statement);
+  }
+
+  function statementHtml(statement) {
+    return `
+      <div class="statement-paper">
+        <h2>${escapeHtml(state.settings.storeName)}</h2>
+        <p><strong>Statement for:</strong> ${escapeHtml(statement.customer.name)}</p>
+        <p><strong>Contact:</strong> ${escapeHtml(statement.customer.phone || "")} ${escapeHtml(statement.customer.email || "")}</p>
+        <table>
+          <thead><tr><th>Date</th><th>Description</th><th>Ref</th><th>Debit</th><th>Credit</th><th>Balance</th></tr></thead>
+          <tbody>
+            ${statement.rows.map((row) => `
+              <tr>
+                <td>${row.date ? new Date(row.date).toLocaleDateString() : ""}</td>
+                <td>${escapeHtml(row.description)}</td>
+                <td>${escapeHtml(row.ref)}</td>
+                <td>${row.debit ? money(row.debit) : ""}</td>
+                <td>${row.credit ? money(row.credit) : ""}</td>
+                <td>${money(row.balance)}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+        <h3>Closing Balance: ${money(statement.closing)}</h3>
+      </div>
+    `;
+  }
+
+  function renderStatementSelectors() {
+    const options = accountCustomers().map((customer) => `<option value="${customer.id}">${escapeHtml(customer.name)}</option>`).join("");
+    els.statementCustomerSelect.innerHTML = options;
+    if (!els.statementFromInput.value) {
+      const today = new Date();
+      els.statementToInput.value = today.toISOString().slice(0, 10);
+      today.setDate(1);
+      els.statementFromInput.value = today.toISOString().slice(0, 10);
+    }
+    renderStatement();
+  }
+
+  function downloadCsv() {
+    const statement = ledgerFor(els.statementCustomerSelect.value, els.statementFromInput.value, els.statementToInput.value);
+    const rows = [["Date", "Description", "Reference", "Debit", "Credit", "Balance"]].concat(statement.rows.map((row) => [
+      row.date ? new Date(row.date).toLocaleDateString() : "",
+      row.description,
+      row.ref,
+      row.debit || "",
+      row.credit || "",
+      row.balance
+    ]));
+    const csv = toCsv(rows);
+    downloadBlob(csv, `${statement.customer.name}-statement.csv`, "text/csv");
+  }
+
+  function downloadPdf() {
+    const printWindow = window.open("", "_blank");
+    printWindow.document.write(`<!doctype html><title>Statement</title><style>body{font-family:Arial;padding:24px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ccc;padding:8px;text-align:left}</style>${els.statementPreview.innerHTML}`);
+    printWindow.document.close();
+    printWindow.focus();
+    printWindow.print();
+  }
+
+  function downloadBlob(content, filename, type) {
+    const blob = new Blob([content], { type });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function renderInventory() {
+    els.newItemCategory.innerHTML = categoryOptions("Food");
+    els.inventoryList.innerHTML = state.products.map((product) => `
+      <form class="record edit-item-form" data-edit-item="${product.id}">
+        <div class="edit-item-grid">
+          <label><span>Name</span><input name="name" type="text" value="${escapeHtml(product.name)}" required /></label>
+          <label><span>Category</span><select name="category" required>${categoryOptions(product.category)}</select></label>
+          <label><span>Price</span><input name="price" type="number" min="0" step="0.01" value="${Number(product.price).toFixed(2)}" required /></label>
+          <label><span>Unit</span><input name="unit" type="text" value="${escapeHtml(product.unit)}" required /></label>
+          <label><span>Stock</span><input name="stock" type="number" min="0" step="1" value="${Number(product.stock)}" required /></label>
+          <label><span>SKU</span><input name="sku" type="text" value="${escapeHtml(product.sku)}" /></label>
+          <label><span>VAT</span><select name="taxable"><option value="true" ${product.taxable ? "selected" : ""}>15% VAT</option><option value="false" ${!product.taxable ? "selected" : ""}>No VAT</option></select></label>
+        </div>
+        <div class="record-actions">
+          <button class="secondary-button" type="submit">Save</button>
+          <button class="danger-button" data-delete-item="${product.id}" type="button">Remove</button>
+        </div>
+      </form>
+    `).join("");
+  }
+
+  function persistProducts() {
+    saveAll();
+    renderTabs();
+    renderProducts();
+    renderCart();
+    renderMetrics();
+  }
+
+  function syncCartLine(product) {
+    state.cart = state.cart.map((line) => line.id === product.id ? {
+      ...line,
+      name: product.name,
+      category: product.category,
+      price: product.price,
+      unit: product.unit,
+      taxable: product.taxable
+    } : line);
+  }
+
+  function saveEditedItem(form) {
+    const product = state.products.find((item) => item.id === form.dataset.editItem);
+    if (!product) return;
+    product.name = form.elements.name.value.trim();
+    product.category = form.elements.category.value;
+    product.price = Number(form.elements.price.value || 0);
+    product.unit = product.category === "Fuel" ? "L" : (form.elements.unit.value.trim() || "each");
+    product.stock = Number(form.elements.stock.value || 0);
+    product.sku = form.elements.sku.value.trim() || product.name.slice(0, 8).toUpperCase();
+    product.taxable = form.elements.taxable.value === "true";
+    syncCartLine(product);
+    persistProducts();
+    renderInventory();
+  }
+
+  function addNewItem() {
+    const name = els.newItemName.value.trim();
+    if (!name) return;
+    const category = els.newItemCategory.value;
+    state.products.push({
+      id: itemId(),
+      name,
+      category,
+      price: Number(els.newItemPrice.value || 0),
+      unit: category === "Fuel" ? "L" : (els.newItemUnit.value.trim() || "each"),
+      stock: Number(els.newItemStock.value || 0),
+      sku: els.newItemSku.value.trim() || name.slice(0, 8).toUpperCase(),
+      taxable: els.newItemTaxable.value === "true"
+    });
+    els.addItemForm.reset();
+    persistProducts();
+    renderInventory();
+  }
+
+  function removeItem(productId) {
+    const product = state.products.find((item) => item.id === productId);
+    if (!product) return;
+    if (!window.confirm(`Remove ${product.name} from the register?`)) return;
+    state.products = state.products.filter((item) => item.id !== productId);
+    state.cart = state.cart.filter((line) => line.id !== productId);
+    persistProducts();
+    renderInventory();
+  }
+
+  function renderSettings() {
+    els.storeNameInput.value = state.settings.storeName;
+    els.currencyInput.value = state.settings.currency;
+    els.taxRateInput.value = state.settings.taxRate;
+    els.adminPinInput.value = state.settings.adminPin;
+    els.staffPinInput.value = state.settings.staffPin;
+    els.recoveryPinInput.value = state.settings.recoveryPin;
+    els.footerInput.value = state.settings.footer;
+  }
+
+  function tickClock() {
+    els.shiftClock.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+
+  function bindEvents() {
+    els.loginForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const pin = els.pinInput.value.trim();
+      if (pin === state.settings.adminPin) login("admin");
+      else if (pin === state.settings.staffPin) login("staff");
+      else els.loginMessage.textContent = "Incorrect PIN.";
+    });
+    els.recoveryBtn.addEventListener("click", () => {
+      const pin = window.prompt("Enter recovery PIN");
+      if (pin === state.settings.recoveryPin) login("admin");
+      else els.loginMessage.textContent = "Incorrect recovery PIN.";
+    });
+    els.logoutBtn.addEventListener("click", logout);
+    els.categoryTabs.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-category]");
+      if (!button) return;
+      state.category = button.dataset.category;
+      renderTabs();
+      renderProducts();
+    });
+    els.paymentTabs.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-method]");
+      if (!button || button.disabled) return;
+      state.paymentMethod = button.dataset.method;
+      renderPaymentTabs();
+      renderCartTotals();
+    });
+    els.saleCustomerSelect.addEventListener("change", () => {
+      state.selectedCustomerId = els.saleCustomerSelect.value;
+      renderPaymentTabs();
+      renderCartTotals();
+    });
+    els.productGrid.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-product]");
+      if (button) addToCart(button.dataset.product);
+    });
+    els.cartLines.addEventListener("click", (event) => {
+      const plus = event.target.closest("[data-plus]");
+      const minus = event.target.closest("[data-minus]");
+      if (plus) updateQty(plus.dataset.plus, 1);
+      if (minus) updateQty(minus.dataset.minus, -1);
+    });
+    els.cartLines.addEventListener("input", (event) => {
+      const input = event.target.closest("[data-qty]");
+      if (input) updateManualQty(input);
+    });
+    els.searchInput.addEventListener("input", (event) => {
+      state.search = event.target.value;
+      renderProducts();
+    });
+    els.clearSearchBtn.addEventListener("click", () => {
+      state.search = "";
+      els.searchInput.value = "";
+      renderProducts();
+    });
+    els.payBtn.addEventListener("click", completeSale);
+    els.voidBtn.addEventListener("click", resetSale);
+    els.closeReceiptBtn.addEventListener("click", () => els.receiptDialog.close());
+    els.printReceiptBtn.addEventListener("click", () => window.print());
+    els.newSaleBtn.addEventListener("click", () => {
+      els.receiptDialog.close();
+      resetSale();
+    });
+    els.historyBtn.addEventListener("click", () => {
+      renderHistory();
+      els.historyDialog.showModal();
+    });
+    els.closeHistoryBtn.addEventListener("click", () => els.historyDialog.close());
+    [els.historyFromInput, els.historyToInput, els.historyStatusInput].forEach((input) => input.addEventListener("change", renderHistory));
+    els.downloadSelectedHistoryBtn.addEventListener("click", () => downloadHistoryExcel(filteredHistory(), "selected"));
+    els.downloadAllHistoryBtn.addEventListener("click", () => downloadHistoryExcel(state.transactions, "full"));
+    els.historyList.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-void-sale]");
+      if (button) voidSale(button.dataset.voidSale);
+    });
+    els.customersBtn.addEventListener("click", () => {
+      renderCustomers();
+      els.customersDialog.showModal();
+    });
+    els.closeCustomersBtn.addEventListener("click", () => els.customersDialog.close());
+    els.addCustomerForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      addCustomer();
+    });
+    els.customersList.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const form = event.target.closest("[data-edit-customer]");
+      if (form) saveEditedCustomer(form);
+    });
+    els.customersList.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-delete-customer]");
+      if (button) removeCustomer(button.dataset.deleteCustomer);
+    });
+    els.paymentsBtn.addEventListener("click", () => {
+      renderPayments();
+      els.paymentsDialog.showModal();
+    });
+    els.closePaymentsBtn.addEventListener("click", () => els.paymentsDialog.close());
+    els.paymentForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      addPayment();
+    });
+    els.statementsBtn.addEventListener("click", () => {
+      renderStatementSelectors();
+      els.statementsDialog.showModal();
+    });
+    els.closeStatementsBtn.addEventListener("click", () => els.statementsDialog.close());
+    [els.statementCustomerSelect, els.statementFromInput, els.statementToInput].forEach((input) => input.addEventListener("change", renderStatement));
+    els.downloadCsvBtn.addEventListener("click", downloadCsv);
+    els.downloadPdfBtn.addEventListener("click", downloadPdf);
+    els.inventoryBtn.addEventListener("click", () => {
+      renderInventory();
+      els.inventoryDialog.showModal();
+    });
+    els.closeInventoryBtn.addEventListener("click", () => els.inventoryDialog.close());
+    els.addItemForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      addNewItem();
+    });
+    els.inventoryList.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const form = event.target.closest("[data-edit-item]");
+      if (form) saveEditedItem(form);
+    });
+    els.inventoryList.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-delete-item]");
+      if (button) removeItem(button.dataset.deleteItem);
+    });
+    els.settingsBtn.addEventListener("click", () => {
+      renderSettings();
+      els.settingsDialog.showModal();
+    });
+    els.closeSettingsBtn.addEventListener("click", () => els.settingsDialog.close());
+    els.settingsForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      state.settings.storeName = els.storeNameInput.value.trim() || "Truck Stop POS";
+      state.settings.currency = els.currencyInput.value.trim() || "R";
+      state.settings.taxRate = Number(els.taxRateInput.value || 15);
+      state.settings.adminPin = els.adminPinInput.value.trim() || "1234";
+      state.settings.staffPin = els.staffPinInput.value.trim() || "0000";
+      state.settings.recoveryPin = els.recoveryPinInput.value.trim() || "9999";
+      state.settings.footer = els.footerInput.value.trim();
+      saveAll();
+      els.settingsDialog.close();
+      renderAll();
+    });
+  }
+
+  function init() {
+    if (!state.settings.currency || state.settings.currency === "$") state.settings.currency = "R";
+    saveAll();
+    bindEvents();
+    renderAll();
+    tickClock();
+    setInterval(tickClock, 30000);
+    els.pinInput.focus();
+  }
+
+  init();
+})();
