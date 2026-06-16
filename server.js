@@ -14,6 +14,8 @@ const dataFile = path.join(root, "pos-data.json");
 const port = Number(process.env.PORT || 4175);
 const host = process.env.HOST || "0.0.0.0";
 const databaseUrl = process.env.DATABASE_URL || "";
+const allowFileStorage = process.env.ALLOW_FILE_STORAGE === "true" || process.env.NODE_ENV !== "production";
+const requireDatabase = !allowFileStorage;
 const useDatabase = Boolean(databaseUrl && pg);
 const pool = useDatabase ? new pg.Pool({
   connectionString: databaseUrl,
@@ -63,12 +65,18 @@ async function initDatabase() {
 }
 
 async function readData() {
+  if (requireDatabase && !databaseReady) {
+    throw new Error("Database is required but not connected");
+  }
   if (!pool || !databaseReady) return readFileData();
   const result = await pool.query("select data from pos_store where id = $1", ["main"]);
   return result.rows[0]?.data || {};
 }
 
 async function writeData(data) {
+  if (requireDatabase && !databaseReady) {
+    throw new Error("Database is required but not connected");
+  }
   if (!pool || !databaseReady) {
     writeFileData(data);
     return;
@@ -119,6 +127,18 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/api/health") {
+      send(res, 200, JSON.stringify({
+        ok: databaseReady || !requireDatabase,
+        storage: databaseReady ? "postgresql" : "local-file",
+        databaseConfigured: Boolean(databaseUrl),
+        databaseReady,
+        requireDatabase,
+        nodeEnv: process.env.NODE_ENV || ""
+      }), "application/json; charset=utf-8");
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/data") {
       const body = await readBody(req);
       await writeData(JSON.parse(body || "{}"));
@@ -152,6 +172,12 @@ const server = http.createServer(async (req, res) => {
 });
 
 async function initDatabaseWithRetry() {
+  if (!pg && requireDatabase) {
+    throw new Error("PostgreSQL dependency 'pg' is not installed. Check package.json and Render build logs.");
+  }
+  if (!databaseUrl && requireDatabase) {
+    throw new Error("DATABASE_URL is required in production. Set it to the Render Internal Database URL.");
+  }
   if (!pool) return;
   const attempts = 8;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -162,6 +188,9 @@ async function initDatabaseWithRetry() {
     } catch (error) {
       console.error(`Database connection attempt ${attempt}/${attempts} failed:`, error.message);
       if (attempt === attempts) {
+        if (requireDatabase) {
+          throw new Error("Database unavailable after retries. Check DATABASE_URL and database status in Render.");
+        }
         console.error("Database unavailable. Starting with local file storage fallback.");
         return;
       }
