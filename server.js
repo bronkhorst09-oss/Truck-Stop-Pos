@@ -1,0 +1,163 @@
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
+let pg = null;
+
+try {
+  pg = require("pg");
+} catch (error) {
+  pg = null;
+}
+
+const root = __dirname;
+const dataFile = path.join(root, "pos-data.json");
+const port = Number(process.env.PORT || 4175);
+const host = process.env.HOST || "0.0.0.0";
+const databaseUrl = process.env.DATABASE_URL || "";
+const useDatabase = Boolean(databaseUrl && pg);
+const pool = useDatabase ? new pg.Pool({
+  connectionString: databaseUrl,
+  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : undefined
+}) : null;
+
+const mimeTypes = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".svg": "image/svg+xml"
+};
+
+function readFileData() {
+  try {
+    return JSON.parse(fs.readFileSync(dataFile, "utf8"));
+  } catch (error) {
+    return {};
+  }
+}
+
+function writeFileData(data) {
+  const tmp = `${dataFile}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+  fs.renameSync(tmp, dataFile);
+}
+
+async function initDatabase() {
+  if (!pool) return;
+  await pool.query(`
+    create table if not exists pos_store (
+      id text primary key,
+      data jsonb not null,
+      updated_at timestamptz not null default now()
+    )
+  `);
+
+  const existing = await pool.query("select id from pos_store where id = $1", ["main"]);
+  if (!existing.rowCount) {
+    await writeData(readFileData());
+  }
+}
+
+async function readData() {
+  if (!pool) return readFileData();
+  const result = await pool.query("select data from pos_store where id = $1", ["main"]);
+  return result.rows[0]?.data || {};
+}
+
+async function writeData(data) {
+  if (!pool) {
+    writeFileData(data);
+    return;
+  }
+  await pool.query(
+    `insert into pos_store (id, data, updated_at)
+     values ($1, $2::jsonb, now())
+     on conflict (id)
+     do update set data = excluded.data, updated_at = now()`,
+    ["main", JSON.stringify(data)]
+  );
+}
+
+function send(res, status, body, type = "text/plain; charset=utf-8") {
+  res.writeHead(status, {
+    "Content-Type": type,
+    "Cache-Control": "no-store"
+  });
+  res.end(body);
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > 8_000_000) {
+        reject(new Error("Request body too large"));
+        req.destroy();
+      }
+    });
+    req.on("end", () => resolve(body));
+    req.on("error", reject);
+  });
+}
+
+const server = http.createServer(async (req, res) => {
+  try {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+
+    if (req.method === "GET" && url.pathname === "/app-data.js") {
+      send(res, 200, `window.__POS_DATA__ = ${JSON.stringify(await readData())};`, "application/javascript; charset=utf-8");
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/data") {
+      send(res, 200, JSON.stringify(await readData()), "application/json; charset=utf-8");
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/data") {
+      const body = await readBody(req);
+      await writeData(JSON.parse(body || "{}"));
+      send(res, 200, JSON.stringify({ ok: true }), "application/json; charset=utf-8");
+      return;
+    }
+
+    if (req.method !== "GET") {
+      send(res, 405, "Method not allowed");
+      return;
+    }
+
+    const requested = url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname);
+    const filePath = path.normalize(path.join(root, requested));
+    if (!filePath.startsWith(root)) {
+      send(res, 403, "Forbidden");
+      return;
+    }
+
+    fs.readFile(filePath, (error, content) => {
+      if (error) {
+        send(res, 404, "Not found");
+        return;
+      }
+      const type = mimeTypes[path.extname(filePath).toLowerCase()] || "application/octet-stream";
+      send(res, 200, content, type);
+    });
+  } catch (error) {
+    send(res, 500, error.message || "Server error");
+  }
+});
+
+initDatabase()
+  .then(() => {
+    server.listen(port, host, () => {
+      const storage = useDatabase ? "PostgreSQL" : "local file";
+      console.log(`Truck Stop POS server running at http://${host}:${port} using ${storage} storage`);
+    });
+  })
+  .catch((error) => {
+    console.error("Failed to start POS server:", error);
+    process.exit(1);
+  });
