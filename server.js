@@ -19,6 +19,7 @@ const pool = useDatabase ? new pg.Pool({
   connectionString: databaseUrl,
   ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : undefined
 }) : null;
+let databaseReady = false;
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -62,13 +63,13 @@ async function initDatabase() {
 }
 
 async function readData() {
-  if (!pool) return readFileData();
+  if (!pool || !databaseReady) return readFileData();
   const result = await pool.query("select data from pos_store where id = $1", ["main"]);
   return result.rows[0]?.data || {};
 }
 
 async function writeData(data) {
-  if (!pool) {
+  if (!pool || !databaseReady) {
     writeFileData(data);
     return;
   }
@@ -150,10 +151,26 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-initDatabase()
+async function initDatabaseWithRetry() {
+  if (!pool) return;
+  const attempts = 8;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await initDatabase();
+      databaseReady = true;
+      return;
+    } catch (error) {
+      console.error(`Database connection attempt ${attempt}/${attempts} failed:`, error.message);
+      if (attempt === attempts) throw error;
+      await new Promise((resolve) => setTimeout(resolve, attempt * 2500));
+    }
+  }
+}
+
+initDatabaseWithRetry()
   .then(() => {
     server.listen(port, host, () => {
-      const storage = useDatabase ? "PostgreSQL" : "local file";
+      const storage = databaseReady ? "PostgreSQL" : "local file";
       console.log(`Truck Stop POS server running at http://${host}:${port} using ${storage} storage`);
     });
   })
