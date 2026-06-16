@@ -13,7 +13,18 @@
     { id: "account-demo", name: "Account Customer", type: "account", phone: "", email: "", vehicle: "", openingBalance: 0 }
   ];
 
+  const storageKeys = [
+    "truck-pos-products",
+    "truck-pos-transactions",
+    "truck-pos-payments",
+    "truck-pos-customers",
+    "truck-pos-settings",
+    "truck-pos-meta"
+  ];
   const serverData = window.__POS_DATA__ || {};
+  const localBackup = readJson("truck-pos-backup", {});
+  const localSnapshot = buildLocalSnapshot();
+  const initialData = mergeSnapshots(serverData, mergeSnapshots(localBackup, localSnapshot));
   const state = {
     products: migrateProducts(load("truck-pos-products", defaultProducts)),
     transactions: load("truck-pos-transactions", []),
@@ -29,6 +40,7 @@
       recoveryPin: "9999",
       ...load("truck-pos-settings", {})
     },
+    meta: load("truck-pos-meta", { lastSavedAt: null }),
     cart: [],
     category: "All",
     search: "",
@@ -135,8 +147,78 @@
     lowStockCount: document.querySelector("#lowStockCount")
   };
 
+  function readJson(key, fallback) {
+    try {
+      const saved = localStorage.getItem(key);
+      return saved ? JSON.parse(saved) : fallback;
+    } catch (error) {
+      return fallback;
+    }
+  }
+
+  function snapshotTimestamp(snapshot) {
+    return Date.parse(snapshot?.["truck-pos-meta"]?.lastSavedAt || "") || 0;
+  }
+
+  function buildLocalSnapshot() {
+    const snapshot = {};
+    storageKeys.forEach((key) => {
+      const value = readJson(key, undefined);
+      if (typeof value !== "undefined") snapshot[key] = value;
+    });
+    return snapshot;
+  }
+
+  function cloneValue(value, fallback) {
+    return Array.isArray(value) ? value.map((item) => ({ ...item })) : (value ? { ...value } : fallback);
+  }
+
+  function uniqueById(list) {
+    const seen = new Set();
+    return list.filter((item) => {
+      const key = item?.id || JSON.stringify(item);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  function mergeList(newerList, olderList) {
+    return uniqueById([...(Array.isArray(newerList) ? newerList : []), ...(Array.isArray(olderList) ? olderList : [])]);
+  }
+
+  function pickValue(primaryValue, secondaryValue, fallback) {
+    if (Array.isArray(primaryValue) && primaryValue.length) return cloneValue(primaryValue, fallback);
+    if (primaryValue && !Array.isArray(primaryValue)) return cloneValue(primaryValue, fallback);
+    if (Array.isArray(secondaryValue) && secondaryValue.length) return cloneValue(secondaryValue, fallback);
+    if (secondaryValue && !Array.isArray(secondaryValue)) return cloneValue(secondaryValue, fallback);
+    return fallback;
+  }
+
+  function mergeSnapshots(firstSnapshot, secondSnapshot) {
+    const first = firstSnapshot || {};
+    const second = secondSnapshot || {};
+    const firstTime = snapshotTimestamp(first);
+    const secondTime = snapshotTimestamp(second);
+    const newer = firstTime >= secondTime ? first : second;
+    const older = newer === first ? second : first;
+    const latestTime = Math.max(firstTime, secondTime);
+    return {
+      "truck-pos-products": pickValue(newer["truck-pos-products"], older["truck-pos-products"], defaultProducts),
+      "truck-pos-transactions": mergeList(newer["truck-pos-transactions"], older["truck-pos-transactions"]),
+      "truck-pos-payments": mergeList(newer["truck-pos-payments"], older["truck-pos-payments"]),
+      "truck-pos-customers": mergeList(newer["truck-pos-customers"], older["truck-pos-customers"]),
+      "truck-pos-settings": pickValue(newer["truck-pos-settings"], older["truck-pos-settings"], {}),
+      "truck-pos-meta": {
+        ...(older["truck-pos-meta"] || {}),
+        ...(newer["truck-pos-meta"] || {}),
+        lastSavedAt: latestTime ? new Date(latestTime).toISOString() : (newer["truck-pos-meta"]?.lastSavedAt || older["truck-pos-meta"]?.lastSavedAt || null)
+      }
+    };
+  }
+
   function load(key, fallback) {
-    if (Object.prototype.hasOwnProperty.call(serverData, key)) return serverData[key];
+    if (Object.prototype.hasOwnProperty.call(initialData, key)) return initialData[key];
     try {
       const saved = localStorage.getItem(key);
       return saved ? JSON.parse(saved) : fallback;
@@ -150,25 +232,44 @@
   }
 
   function currentData() {
+    state.meta.lastSavedAt = new Date().toISOString();
     return {
       "truck-pos-products": state.products,
       "truck-pos-transactions": state.transactions,
       "truck-pos-payments": state.payments,
       "truck-pos-customers": state.customers,
-      "truck-pos-settings": state.settings
+      "truck-pos-settings": state.settings,
+      "truck-pos-meta": state.meta
     };
   }
 
-  function saveAll() {
+  function canSaveToServer() {
+    return window.location.protocol === "http:" || window.location.protocol === "https:";
+  }
+
+  async function saveAll() {
     const data = currentData();
     Object.entries(data).forEach(([key, value]) => save(key, value));
-    if (window.location.protocol === "http:") {
-      fetch("/api/data", {
+    save("truck-pos-backup", data);
+    if (canSaveToServer()) {
+      const response = await fetch("/api/data", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(data),
         keepalive: true
-      }).catch(() => {});
+      });
+      if (!response.ok) throw new Error("Could not save data to the server.");
+    }
+    return true;
+  }
+
+  async function persistChange(message) {
+    try {
+      await saveAll();
+      return true;
+    } catch (error) {
+      window.alert(message || "This change could not be saved yet. Please try again.");
+      return false;
     }
   }
 
@@ -409,7 +510,7 @@
     ].join("\n");
   }
 
-  function completeSale() {
+  async function completeSale() {
     const customer = selectedCustomer();
     const allowed = allowedPaymentMethods(customer);
     if (!validCart() || !customer || !allowed.includes(state.paymentMethod)) return renderCartTotals();
@@ -428,7 +529,10 @@
       totals: currentTotals
     };
     state.transactions.unshift(transaction);
-    saveAll();
+    if (!(await persistChange("Sale was not saved. Please wait a moment and try again."))) {
+      state.transactions.shift();
+      return;
+    }
     els.receiptText.textContent = receipt(transaction);
     els.receiptDialog.showModal();
     renderMetrics();
@@ -462,16 +566,28 @@
       </div>`).join("") : '<div class="empty-state">No transactions for this selection.</div>';
   }
 
-  function voidSale(id) {
+  async function voidSale(id) {
     const transaction = state.transactions.find((item) => item.id === id);
     if (!transaction || transaction.status === "void") return;
     const reason = window.prompt("Reason for voiding this sale?");
     if (!reason) return;
+    const previous = {
+      status: transaction.status,
+      voidReason: transaction.voidReason,
+      voidedAt: transaction.voidedAt,
+      voidedBy: transaction.voidedBy
+    };
     transaction.status = "void";
     transaction.voidReason = reason;
     transaction.voidedAt = new Date().toISOString();
     transaction.voidedBy = state.currentUser;
-    saveAll();
+    if (!(await persistChange("Void was not saved. Please try again."))) {
+      transaction.status = previous.status;
+      transaction.voidReason = previous.voidReason;
+      transaction.voidedAt = previous.voidedAt;
+      transaction.voidedBy = previous.voidedBy;
+      return;
+    }
     renderHistory();
     renderMetrics();
   }
@@ -647,10 +763,10 @@
       </form>`).join("");
   }
 
-  function addCustomer() {
+  async function addCustomer() {
     const name = els.customerNameInput.value.trim();
     if (!name) return;
-    state.customers.push({
+    const customer = {
       id: uid("C"),
       name,
       type: els.customerTypeInput.value,
@@ -658,35 +774,47 @@
       email: els.customerEmailInput.value.trim(),
       vehicle: els.customerVehicleInput.value.trim(),
       openingBalance: Number(els.customerOpeningBalanceInput.value || 0)
-    });
+    };
+    state.customers.push(customer);
     els.addCustomerForm.reset();
-    saveAll();
+    if (!(await persistChange("Customer was not saved. Please try again."))) {
+      state.customers = state.customers.filter((item) => item.id !== customer.id);
+      return;
+    }
     renderCustomers();
     renderCustomersForSale();
   }
 
-  function saveEditedCustomer(form) {
+  async function saveEditedCustomer(form) {
     const customer = state.customers.find((item) => item.id === form.dataset.editCustomer);
     if (!customer) return;
+    const previous = { ...customer };
     customer.name = form.elements.name.value.trim();
     customer.type = form.elements.type.value;
     customer.phone = form.elements.phone.value.trim();
     customer.email = form.elements.email.value.trim();
     customer.vehicle = form.elements.vehicle.value.trim();
     customer.openingBalance = Number(form.elements.openingBalance.value || 0);
-    saveAll();
+    if (!(await persistChange("Customer changes were not saved. Please try again."))) {
+      Object.assign(customer, previous);
+      return;
+    }
     renderCustomers();
     renderCustomersForSale();
     renderPaymentTabs();
   }
 
-  function removeCustomer(id) {
+  async function removeCustomer(id) {
     if (id === "walkin") return;
     if (state.transactions.some((sale) => sale.customerId === id) || state.payments.some((payment) => payment.customerId === id)) {
       return window.alert("This customer already has sales or payments. Keep them for history.");
     }
+    const previousCustomers = state.customers.slice();
     state.customers = state.customers.filter((customer) => customer.id !== id);
-    saveAll();
+    if (!(await persistChange("Customer removal was not saved. Please try again."))) {
+      state.customers = previousCustomers;
+      return;
+    }
     renderCustomers();
     renderCustomersForSale();
   }
@@ -701,10 +829,10 @@
       </div>`).join("") : '<div class="empty-state">No payments loaded yet.</div>';
   }
 
-  function addPayment() {
+  async function addPayment() {
     const customer = state.customers.find((item) => item.id === els.paymentCustomerSelect.value);
     if (!customer || customer.type !== "account") return;
-    state.payments.unshift({
+    const payment = {
       id: uid("P"),
       type: "payment",
       date: new Date().toISOString(),
@@ -715,9 +843,13 @@
       reference: els.paymentReferenceInput.value.trim(),
       notes: els.paymentNotesInput.value.trim(),
       userRole: state.currentUser
-    });
+    };
+    state.payments.unshift(payment);
     els.paymentForm.reset();
-    saveAll();
+    if (!(await persistChange("Payment was not saved. Please try again."))) {
+      state.payments = state.payments.filter((item) => item.id !== payment.id);
+      return;
+    }
     renderPayments();
   }
 
@@ -745,17 +877,19 @@
     state.cart = state.cart.map((line) => line.id === product.id ? { ...line, name: product.name, category: product.category, price: product.price, unit: product.unit, taxable: product.taxable } : line);
   }
 
-  function persistProducts() {
-    saveAll();
+  async function persistProducts() {
+    if (!(await persistChange("Item changes were not saved. Please try again."))) return false;
     renderTabs();
     renderProducts();
     renderCart();
     renderMetrics();
+    return true;
   }
 
-  function saveEditedItem(form) {
+  async function saveEditedItem(form) {
     const product = state.products.find((item) => item.id === form.dataset.editItem);
     if (!product) return;
+    const previous = { ...product };
     product.name = form.elements.name.value.trim();
     product.category = form.elements.category.value;
     product.price = Number(form.elements.price.value || 0);
@@ -764,15 +898,19 @@
     product.sku = form.elements.sku.value.trim() || product.name.slice(0, 8).toUpperCase();
     product.taxable = form.elements.taxable.value === "true";
     syncCartLine(product);
-    persistProducts();
+    if (!(await persistProducts())) {
+      Object.assign(product, previous);
+      syncCartLine(product);
+      return;
+    }
     renderInventory();
   }
 
-  function addNewItem() {
+  async function addNewItem() {
     const name = els.newItemName.value.trim();
     if (!name) return;
     const category = els.newItemCategory.value;
-    state.products.push({
+    const product = {
       id: itemId(),
       name,
       category,
@@ -781,19 +919,29 @@
       stock: Number(els.newItemStock.value || 0),
       sku: els.newItemSku.value.trim() || name.slice(0, 8).toUpperCase(),
       taxable: els.newItemTaxable.value === "true"
-    });
+    };
+    state.products.push(product);
     els.addItemForm.reset();
-    persistProducts();
+    if (!(await persistProducts())) {
+      state.products = state.products.filter((item) => item.id !== product.id);
+      return;
+    }
     renderInventory();
   }
 
-  function removeItem(productId) {
+  async function removeItem(productId) {
     const product = state.products.find((item) => item.id === productId);
     if (!product) return;
     if (!window.confirm(`Remove ${product.name} from the register?`)) return;
+    const previousProducts = state.products.slice();
+    const previousCart = state.cart.slice();
     state.products = state.products.filter((item) => item.id !== productId);
     state.cart = state.cart.filter((line) => line.id !== productId);
-    persistProducts();
+    if (!(await persistProducts())) {
+      state.products = previousProducts;
+      state.cart = previousCart;
+      return;
+    }
     renderInventory();
   }
 
@@ -888,7 +1036,9 @@
       els.searchInput.value = "";
       renderProducts();
     });
-    els.payBtn.addEventListener("click", completeSale);
+    els.payBtn.addEventListener("click", () => {
+      void completeSale();
+    });
     els.voidBtn.addEventListener("click", resetSale);
     els.closeReceiptBtn.addEventListener("click", () => els.receiptDialog.close());
     els.printReceiptBtn.addEventListener("click", () => window.print());
@@ -906,7 +1056,7 @@
     els.downloadAllHistoryBtn.addEventListener("click", () => downloadHistoryExcel(state.transactions, "full"));
     els.historyList.addEventListener("click", (event) => {
       const button = event.target.closest("[data-void-sale]");
-      if (button) voidSale(button.dataset.voidSale);
+      if (button) void voidSale(button.dataset.voidSale);
     });
     els.customersBtn.addEventListener("click", () => {
       renderCustomers();
@@ -915,16 +1065,16 @@
     els.closeCustomersBtn.addEventListener("click", () => els.customersDialog.close());
     els.addCustomerForm.addEventListener("submit", (event) => {
       event.preventDefault();
-      addCustomer();
+      void addCustomer();
     });
     els.customersList.addEventListener("submit", (event) => {
       event.preventDefault();
       const form = event.target.closest("[data-edit-customer]");
-      if (form) saveEditedCustomer(form);
+      if (form) void saveEditedCustomer(form);
     });
     els.customersList.addEventListener("click", (event) => {
       const button = event.target.closest("[data-delete-customer]");
-      if (button) removeCustomer(button.dataset.deleteCustomer);
+      if (button) void removeCustomer(button.dataset.deleteCustomer);
     });
     els.paymentsBtn.addEventListener("click", () => {
       renderPayments();
@@ -933,7 +1083,7 @@
     els.closePaymentsBtn.addEventListener("click", () => els.paymentsDialog.close());
     els.paymentForm.addEventListener("submit", (event) => {
       event.preventDefault();
-      addPayment();
+      void addPayment();
     });
     els.statementsBtn.addEventListener("click", () => {
       renderStatementSelectors();
@@ -950,24 +1100,25 @@
     els.closeInventoryBtn.addEventListener("click", () => els.inventoryDialog.close());
     els.addItemForm.addEventListener("submit", (event) => {
       event.preventDefault();
-      addNewItem();
+      void addNewItem();
     });
     els.inventoryList.addEventListener("submit", (event) => {
       event.preventDefault();
       const form = event.target.closest("[data-edit-item]");
-      if (form) saveEditedItem(form);
+      if (form) void saveEditedItem(form);
     });
     els.inventoryList.addEventListener("click", (event) => {
       const button = event.target.closest("[data-delete-item]");
-      if (button) removeItem(button.dataset.deleteItem);
+      if (button) void removeItem(button.dataset.deleteItem);
     });
     els.settingsBtn.addEventListener("click", () => {
       renderSettings();
       els.settingsDialog.showModal();
     });
     els.closeSettingsBtn.addEventListener("click", () => els.settingsDialog.close());
-    els.settingsForm.addEventListener("submit", (event) => {
+    els.settingsForm.addEventListener("submit", async (event) => {
       event.preventDefault();
+      const previous = { ...state.settings };
       state.settings.storeName = els.storeNameInput.value.trim() || "Truck Stop POS";
       state.settings.currency = els.currencyInput.value.trim() || "R";
       state.settings.taxRate = Number(els.taxRateInput.value || 15);
@@ -975,20 +1126,36 @@
       state.settings.staffPin = els.staffPinInput.value.trim() || "0000";
       state.settings.recoveryPin = els.recoveryPinInput.value.trim() || "9999";
       state.settings.footer = els.footerInput.value.trim();
-      saveAll();
+      if (!(await persistChange("Settings were not saved. Please try again."))) {
+        state.settings = previous;
+        return;
+      }
       els.settingsDialog.close();
       renderAll();
     });
   }
 
   function init() {
-    if (!state.settings.currency || state.settings.currency === "$") state.settings.currency = "R";
-    saveAll();
+    let normalized = false;
+    if (!state.settings.currency || state.settings.currency === "$") {
+      state.settings.currency = "R";
+      normalized = true;
+    }
     bindEvents();
     renderAll();
     tickClock();
     setInterval(tickClock, 30000);
     els.pinInput.focus();
+    if (normalized) void saveAll().catch(() => {});
+    window.addEventListener("beforeunload", () => {
+      const data = currentData();
+      try {
+        localStorage.setItem("truck-pos-backup", JSON.stringify(data));
+      } catch (error) {}
+      if (canSaveToServer() && navigator.sendBeacon) {
+        navigator.sendBeacon("/api/data", new Blob([JSON.stringify(data)], { type: "application/json" }));
+      }
+    });
   }
 
   init();
