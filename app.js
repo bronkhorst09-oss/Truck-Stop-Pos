@@ -14,6 +14,8 @@
   ];
 
   const serverData = window.__POS_DATA__ || {};
+  const localBackup = readJson("truck-pos-backup", {});
+  const initialData = selectInitialData(serverData, localBackup);
   const state = {
     products: migrateProducts(load("truck-pos-products", defaultProducts)),
     transactions: load("truck-pos-transactions", []),
@@ -29,6 +31,7 @@
       recoveryPin: "9999",
       ...load("truck-pos-settings", {})
     },
+    meta: load("truck-pos-meta", { lastSavedAt: null }),
     cart: [],
     category: "All",
     search: "",
@@ -135,8 +138,25 @@
     lowStockCount: document.querySelector("#lowStockCount")
   };
 
+  function readJson(key, fallback) {
+    try {
+      const saved = localStorage.getItem(key);
+      return saved ? JSON.parse(saved) : fallback;
+    } catch (error) {
+      return fallback;
+    }
+  }
+
+  function snapshotTimestamp(snapshot) {
+    return Date.parse(snapshot?.["truck-pos-meta"]?.lastSavedAt || "") || 0;
+  }
+
+  function selectInitialData(primarySnapshot, backupSnapshot) {
+    return snapshotTimestamp(backupSnapshot) > snapshotTimestamp(primarySnapshot) ? backupSnapshot : primarySnapshot;
+  }
+
   function load(key, fallback) {
-    if (Object.prototype.hasOwnProperty.call(serverData, key)) return serverData[key];
+    if (Object.prototype.hasOwnProperty.call(initialData, key)) return initialData[key];
     try {
       const saved = localStorage.getItem(key);
       return saved ? JSON.parse(saved) : fallback;
@@ -150,18 +170,21 @@
   }
 
   function currentData() {
+    state.meta.lastSavedAt = new Date().toISOString();
     return {
       "truck-pos-products": state.products,
       "truck-pos-transactions": state.transactions,
       "truck-pos-payments": state.payments,
       "truck-pos-customers": state.customers,
-      "truck-pos-settings": state.settings
+      "truck-pos-settings": state.settings,
+      "truck-pos-meta": state.meta
     };
   }
 
   function saveAll() {
     const data = currentData();
     Object.entries(data).forEach(([key, value]) => save(key, value));
+    save("truck-pos-backup", data);
     if (window.location.protocol === "http:") {
       fetch("/api/data", {
         method: "POST",
@@ -989,6 +1012,15 @@
     tickClock();
     setInterval(tickClock, 30000);
     els.pinInput.focus();
+    window.addEventListener("beforeunload", () => {
+      const data = currentData();
+      try {
+        localStorage.setItem("truck-pos-backup", JSON.stringify(data));
+      } catch (error) {}
+      if (window.location.protocol === "http:" && navigator.sendBeacon) {
+        navigator.sendBeacon("/api/data", new Blob([JSON.stringify(data)], { type: "application/json" }));
+      }
+    });
   }
 
   init();
