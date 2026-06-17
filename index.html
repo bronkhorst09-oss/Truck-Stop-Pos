@@ -1,272 +1,330 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Truck Stop POS</title>
-    <link rel="stylesheet" href="app/styles.css" />
-  </head>
-  <body>
-    <section class="login-screen" id="loginScreen">
-      <form class="login-card" id="loginForm">
-        <p class="eyebrow">Truck Stop POS</p>
-        <h1>PIN Login</h1>
-        <label>
-          <span>PIN</span>
-          <input id="pinInput" type="password" inputmode="numeric" autocomplete="off" required />
-        </label>
-        <button class="primary-button" type="submit">Log In</button>
-        <button class="secondary-button" id="recoveryBtn" type="button">Recover Admin</button>
-        <p class="form-message" id="loginMessage"></p>
-      </form>
-    </section>
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
+let pg = null;
 
-    <div class="app-shell hidden" id="appShell">
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">Truck Stop POS</p>
-          <h1 id="screenTitle">Register</h1>
-        </div>
-        <div class="status-strip">
-          <span id="roleBadge">Staff</span>
-          <span id="shiftClock">--:--</span>
-          <span id="shiftSales">R0.00 shift</span>
-          <button class="ghost-button admin-only" id="settingsBtn" type="button">Settings</button>
-          <button class="ghost-button" id="logoutBtn" type="button">Logout</button>
-        </div>
-      </header>
+try {
+  pg = require("pg");
+} catch (error) {
+  pg = null;
+}
 
-      <main class="workspace">
-        <section class="catalog-panel" aria-label="Catalog">
-          <div class="search-row">
-            <label class="search-box">
-              <span>Search</span>
-              <input id="searchInput" type="search" placeholder="Item, SKU, diesel, coffee..." autocomplete="off" />
-            </label>
-            <button class="icon-button" id="clearSearchBtn" type="button" title="Clear search">X</button>
-          </div>
+const root = __dirname;
+const dataFile = path.join(root, "pos-data.json");
+const port = Number(process.env.PORT || 4175);
+const host = process.env.HOST || "0.0.0.0";
+const databaseUrl = process.env.DATABASE_URL || "";
+const allowFileStorage = process.env.ALLOW_FILE_STORAGE === "true" || process.env.NODE_ENV !== "production";
+const requireDatabase = !allowFileStorage;
+const useDatabase = Boolean(databaseUrl && pg);
+const pool = useDatabase ? new pg.Pool({
+  connectionString: databaseUrl,
+  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : undefined
+}) : null;
+let databaseReady = false;
 
-          <div class="tabs" id="categoryTabs" role="tablist" aria-label="Product categories"></div>
-          <div class="product-grid" id="productGrid" aria-live="polite"></div>
-        </section>
+const mimeTypes = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".svg": "image/svg+xml"
+};
 
-        <aside class="checkout-panel" aria-label="Checkout">
-          <div class="checkout-header">
-            <div>
-              <p class="eyebrow">Current Sale</p>
-              <h2 id="cartCount">0 items</h2>
-            </div>
-            <button class="danger-button" id="voidBtn" type="button">Clear</button>
-          </div>
+function readFileData() {
+  try {
+    return JSON.parse(fs.readFileSync(dataFile, "utf8"));
+  } catch (error) {
+    return {};
+  }
+}
 
-          <div class="customer-sale-box">
-            <label>
-              <span>Customer</span>
-              <select id="saleCustomerSelect" required></select>
-            </label>
-            <p class="rule-message" id="saleRuleMessage"></p>
-          </div>
+function writeFileData(data) {
+  const tmp = `${dataFile}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+  fs.renameSync(tmp, dataFile);
+}
 
-          <div class="cart-lines" id="cartLines"></div>
+function itemTime(item) {
+  return Date.parse(item?.updatedAt || item?.voidedAt || item?.deletedAt || item?.date || "") || 0;
+}
 
-          <div class="totals">
-            <div><span>Subtotal</span><strong id="subtotal">R0.00</strong></div>
-            <div><span>VAT</span><strong id="taxAmount">R0.00</strong></div>
-            <div class="grand-total"><span>Total</span><strong id="total">R0.00</strong></div>
-          </div>
+function mergeById(incomingList, existingList) {
+  const merged = new Map();
+  [...(Array.isArray(existingList) ? existingList : []), ...(Array.isArray(incomingList) ? incomingList : [])].forEach((item) => {
+    if (!item) return;
+    const key = item.id || JSON.stringify(item);
+    const current = merged.get(key);
+    if (!current || itemTime(item) >= itemTime(current)) {
+      merged.set(key, item);
+    }
+  });
+  return Array.from(merged.values()).sort((a, b) => itemTime(b) - itemTime(a));
+}
 
-          <div class="payment">
-            <div class="payment-tabs" id="paymentTabs"></div>
-            <button class="primary-button" id="payBtn" type="button">Complete Sale</button>
-          </div>
-        </aside>
-      </main>
+function deletedIdsFrom(...snapshots) {
+  return Array.from(new Set(snapshots.flatMap((snapshot) => snapshot?.["truck-pos-deleted-payments"] || [])));
+}
 
-      <section class="bottom-band">
-        <div class="metric">
-          <span>Transactions</span>
-          <strong id="transactionCount">0</strong>
-        </div>
-        <div class="metric">
-          <span>Average Ticket</span>
-          <strong id="averageTicket">R0.00</strong>
-        </div>
-        <div class="metric">
-          <span>Low Stock</span>
-          <strong id="lowStockCount">0</strong>
-        </div>
-        <button class="secondary-button admin-only" id="historyBtn" type="button">History</button>
-        <button class="secondary-button admin-only" id="tillBtn" type="button">Till</button>
-        <button class="secondary-button admin-only" id="customersBtn" type="button">Customers</button>
-        <button class="secondary-button admin-only" id="paymentsBtn" type="button">Payments</button>
-        <button class="secondary-button admin-only" id="statementsBtn" type="button">Statements</button>
-        <button class="secondary-button admin-only" id="inventoryBtn" type="button">Inventory</button>
-      </section>
-    </div>
+function appError(message, statusCode = 400) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
 
-    <dialog id="receiptDialog">
-      <div class="modal-head">
-        <h2>Receipt</h2>
-        <button class="icon-button" id="closeReceiptBtn" type="button" title="Close">X</button>
-      </div>
-      <pre id="receiptText"></pre>
-      <div class="modal-actions">
-        <button class="secondary-button" id="printReceiptBtn" type="button">Print</button>
-        <button class="primary-button" id="newSaleBtn" type="button">New Sale</button>
-      </div>
-    </dialog>
+function tillBalance(data, method) {
+  const sales = (data?.["truck-pos-transactions"] || [])
+    .filter((transaction) => transaction.status !== "void" && transaction.paymentMethod === method)
+    .reduce((sum, transaction) => sum + Number(transaction.totals?.total || 0), 0);
+  const collections = (data?.["truck-pos-collections"] || [])
+    .filter((collection) => collection.method === method)
+    .reduce((sum, collection) => sum + Number(collection.amount || 0), 0);
+  return sales - collections;
+}
 
-    <dialog id="historyDialog">
-      <div class="modal-head">
-        <h2>Sales History</h2>
-        <button class="icon-button" id="closeHistoryBtn" type="button" title="Close">X</button>
-      </div>
-      <div class="history-tools">
-        <div class="item-form-grid">
-          <label><span>From</span><input id="historyFromInput" type="date" /></label>
-          <label><span>To</span><input id="historyToInput" type="date" /></label>
-          <label>
-            <span>Status</span>
-            <select id="historyStatusInput">
-              <option value="all">All</option>
-              <option value="active">Active</option>
-              <option value="void">Voided</option>
-            </select>
-          </label>
-        </div>
-        <div class="record-actions">
-          <button class="secondary-button" id="downloadSelectedHistoryBtn" type="button">Download Selected Excel</button>
-          <button class="primary-button" id="downloadAllHistoryBtn" type="button">Download Full Excel</button>
-        </div>
-      </div>
-      <div id="historyList" class="record-list"></div>
-    </dialog>
+function money(value) {
+  return `R${Number(value || 0).toFixed(2)}`;
+}
 
-    <dialog id="tillDialog">
-      <div class="modal-head">
-        <h2>Till Control</h2>
-        <button class="icon-button" id="closeTillBtn" type="button" title="Close">X</button>
-      </div>
-      <div class="item-form">
-        <div class="item-form-grid">
-          <div class="metric">
-            <span>Cash on hand</span>
-            <strong id="cashTillBalance">R0.00</strong>
-          </div>
-          <div class="metric">
-            <span>Card/swipe total</span>
-            <strong id="cardTillBalance">R0.00</strong>
-          </div>
-        </div>
-      </div>
-      <form class="item-form" id="tillCollectionForm">
-        <h3>Record Collection</h3>
-        <div class="item-form-grid">
-          <label><span>Type</span><select id="tillCollectionMethod"><option>Cash</option><option>Card</option></select></label>
-          <label><span>Amount</span><input id="tillCollectionAmount" type="number" min="0.01" step="0.01" required /></label>
-          <label><span>Reference / Notes</span><input id="tillCollectionNote" type="text" /></label>
-        </div>
-        <button class="primary-button" type="submit">Save Collection</button>
-      </form>
-      <div id="tillCollectionsList" class="record-list"></div>
-    </dialog>
+function validateNewCollections(incoming, existing) {
+  const incomingData = incoming || {};
+  const existingData = existing || {};
+  const existingCollectionIds = new Set((existingData["truck-pos-collections"] || []).map((collection) => collection.id));
+  const newCollections = (incomingData["truck-pos-collections"] || [])
+    .filter((collection) => collection?.id && !existingCollectionIds.has(collection.id))
+    .sort((a, b) => itemTime(a) - itemTime(b));
+  if (!newCollections.length) return;
 
-    <dialog id="customersDialog">
-      <div class="modal-head">
-        <h2>Customers</h2>
-        <button class="icon-button" id="closeCustomersBtn" type="button" title="Close">X</button>
-      </div>
-      <form class="item-form" id="addCustomerForm">
-        <h3>Add Customer</h3>
-        <div class="item-form-grid">
-          <label><span>Name</span><input id="customerNameInput" type="text" required /></label>
-          <label><span>Type</span><select id="customerTypeInput"><option value="prepaid">Prepaid</option><option value="account">Account</option></select></label>
-          <label><span>Phone</span><input id="customerPhoneInput" type="text" /></label>
-          <label><span>Email</span><input id="customerEmailInput" type="email" /></label>
-          <label><span>Vehicle / Reg</span><input id="customerVehicleInput" type="text" /></label>
-          <label><span>Opening Balance</span><input id="customerOpeningBalanceInput" type="number" step="0.01" value="0" /></label>
-        </div>
-        <button class="primary-button" type="submit">Add Customer</button>
-      </form>
-      <div id="customersList" class="record-list"></div>
-    </dialog>
+  const balanceData = {
+    ...existingData,
+    ...incomingData,
+    "truck-pos-transactions": mergeById(incomingData["truck-pos-transactions"], existingData["truck-pos-transactions"]),
+    "truck-pos-collections": existingData["truck-pos-collections"] || []
+  };
+  const balances = {
+    Cash: tillBalance(balanceData, "Cash"),
+    Card: tillBalance(balanceData, "Card")
+  };
 
-    <dialog id="paymentsDialog">
-      <div class="modal-head">
-        <h2>Load Payment</h2>
-        <button class="icon-button" id="closePaymentsBtn" type="button" title="Close">X</button>
-      </div>
-      <form class="item-form" id="paymentForm">
-        <div class="item-form-grid">
-          <label><span>Account Customer</span><select id="paymentCustomerSelect" required></select></label>
-          <label><span>Amount Paid</span><input id="paymentAmountInput" type="number" min="0.01" step="0.01" required /></label>
-          <label><span>Method</span><select id="paymentMethodInput"><option>Cash</option><option>Card</option><option>EFT</option></select></label>
-          <label><span>Reference</span><input id="paymentReferenceInput" type="text" /></label>
-          <label><span>Notes</span><input id="paymentNotesInput" type="text" /></label>
-        </div>
-        <button class="primary-button" type="submit">Save Payment</button>
-      </form>
-      <div id="paymentsList" class="record-list"></div>
-    </dialog>
+  newCollections.forEach((collection) => {
+    const method = collection.method;
+    const amount = Number(collection.amount || 0);
+    if (!["Cash", "Card"].includes(method) || amount <= 0) {
+      throw appError("Invalid till collection. Please check the type and amount.", 409);
+    }
+    if (amount > balances[method] + 0.005) {
+      throw appError(`${method} collection blocked. Available ${method.toLowerCase()} balance is ${money(Math.max(0, balances[method]))}. Refresh Till and try again.`, 409);
+    }
+    balances[method] -= amount;
+  });
+}
 
-    <dialog id="statementsDialog">
-      <div class="modal-head">
-        <h2>Statements</h2>
-        <button class="icon-button" id="closeStatementsBtn" type="button" title="Close">X</button>
-      </div>
-      <div class="item-form">
-        <div class="item-form-grid">
-          <label><span>Account Customer</span><select id="statementCustomerSelect"></select></label>
-          <label><span>From</span><input id="statementFromInput" type="date" /></label>
-          <label><span>To</span><input id="statementToInput" type="date" /></label>
-        </div>
-        <div class="record-actions">
-          <button class="secondary-button" id="downloadCsvBtn" type="button">Download Excel</button>
-          <button class="primary-button" id="downloadPdfBtn" type="button">Download PDF</button>
-        </div>
-      </div>
-      <div id="statementPreview" class="statement-preview"></div>
-    </dialog>
+function mergeData(incoming, existing) {
+  const incomingData = incoming || {};
+  const existingData = existing || {};
+  const deletedPayments = deletedIdsFrom(incomingData, existingData);
+  return {
+    ...existingData,
+    ...incomingData,
+    "truck-pos-transactions": mergeById(incomingData["truck-pos-transactions"], existingData["truck-pos-transactions"]),
+    "truck-pos-payments": mergeById(incomingData["truck-pos-payments"], existingData["truck-pos-payments"]).filter((payment) => !deletedPayments.includes(payment.id)),
+    "truck-pos-deleted-payments": deletedPayments,
+    "truck-pos-collections": mergeById(incomingData["truck-pos-collections"], existingData["truck-pos-collections"]),
+    "truck-pos-meta": {
+      ...(existingData["truck-pos-meta"] || {}),
+      ...(incomingData["truck-pos-meta"] || {}),
+      lastSavedAt: new Date().toISOString()
+    }
+  };
+}
 
-    <dialog id="inventoryDialog">
-      <div class="modal-head">
-        <h2>Inventory</h2>
-        <button class="icon-button" id="closeInventoryBtn" type="button" title="Close">X</button>
-      </div>
-      <form class="item-form" id="addItemForm">
-        <h3>Add Item</h3>
-        <div class="item-form-grid">
-          <label><span>Name</span><input id="newItemName" type="text" placeholder="Item name" required /></label>
-          <label><span>Category</span><select id="newItemCategory" required></select></label>
-          <label><span>Price</span><input id="newItemPrice" type="number" min="0" step="0.01" placeholder="0.00" required /></label>
-          <label><span>Unit</span><input id="newItemUnit" type="text" placeholder="each" required /></label>
-          <label><span>Stock</span><input id="newItemStock" type="number" min="0" step="1" placeholder="0" required /></label>
-          <label><span>SKU</span><input id="newItemSku" type="text" placeholder="SKU" /></label>
-          <label><span>VAT</span><select id="newItemTaxable"><option value="true">15% VAT</option><option value="false">No VAT</option></select></label>
-        </div>
-        <button class="primary-button" type="submit">Add Item</button>
-      </form>
-      <div id="inventoryList" class="record-list"></div>
-    </dialog>
+async function initDatabase() {
+  if (!pool) return;
+  await pool.query(`
+    create table if not exists pos_store (
+      id text primary key,
+      data jsonb not null,
+      updated_at timestamptz not null default now()
+    )
+  `);
 
-    <dialog id="settingsDialog">
-      <div class="modal-head">
-        <h2>Store Settings</h2>
-        <button class="icon-button" id="closeSettingsBtn" type="button" title="Close">X</button>
-      </div>
-      <form class="settings-form" id="settingsForm">
-        <label><span>Store Name</span><input id="storeNameInput" type="text" required /></label>
-        <label><span>Currency Symbol</span><input id="currencyInput" type="text" maxlength="4" required /></label>
-        <label><span>VAT %</span><input id="taxRateInput" type="number" min="0" max="30" step="0.1" required /></label>
-        <label><span>Admin PIN</span><input id="adminPinInput" type="password" inputmode="numeric" required /></label>
-        <label><span>Staff PIN</span><input id="staffPinInput" type="password" inputmode="numeric" required /></label>
-        <label><span>Recovery PIN</span><input id="recoveryPinInput" type="password" inputmode="numeric" required /></label>
-        <label><span>Receipt Footer</span><input id="footerInput" type="text" /></label>
-        <button class="primary-button" type="submit">Save Settings</button>
-      </form>
-    </dialog>
+  const existing = await pool.query("select id from pos_store where id = $1", ["main"]);
+  if (!existing.rowCount) {
+    await pool.query(
+      `insert into pos_store (id, data, updated_at)
+       values ($1, $2::jsonb, now())`,
+      ["main", JSON.stringify(readFileData())]
+    );
+  }
+}
 
-    <script src="app-data.js"></script>
-    <script src="app/app.js"></script>
-  </body>
-</html>
+async function readData() {
+  if (requireDatabase && !databaseReady) {
+    throw new Error("Database is required but not connected");
+  }
+  if (!pool || !databaseReady) return readFileData();
+  const result = await pool.query("select data from pos_store where id = $1", ["main"]);
+  return result.rows[0]?.data || {};
+}
+
+async function writeData(data) {
+  if (requireDatabase && !databaseReady) {
+    throw new Error("Database is required but not connected");
+  }
+  if (!pool || !databaseReady) {
+    const existing = readFileData();
+    validateNewCollections(data, existing);
+    const merged = mergeData(data, existing);
+    writeFileData(merged);
+    return merged;
+  }
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const result = await client.query("select data from pos_store where id = $1 for update", ["main"]);
+    const existing = result.rows[0]?.data || {};
+    validateNewCollections(data, existing);
+    const merged = mergeData(data, existing);
+    await client.query(
+      `insert into pos_store (id, data, updated_at)
+       values ($1, $2::jsonb, now())
+       on conflict (id)
+       do update set data = excluded.data, updated_at = now()`,
+      ["main", JSON.stringify(merged)]
+    );
+    await client.query("commit");
+    return merged;
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+function send(res, status, body, type = "text/plain; charset=utf-8") {
+  res.writeHead(status, {
+    "Content-Type": type,
+    "Cache-Control": "no-store"
+  });
+  res.end(body);
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > 8_000_000) {
+        reject(new Error("Request body too large"));
+        req.destroy();
+      }
+    });
+    req.on("end", () => resolve(body));
+    req.on("error", reject);
+  });
+}
+
+const server = http.createServer(async (req, res) => {
+  try {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+
+    if (req.method === "GET" && url.pathname === "/app-data.js") {
+      send(res, 200, `window.__POS_DATA__ = ${JSON.stringify(await readData())};`, "application/javascript; charset=utf-8");
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/data") {
+      send(res, 200, JSON.stringify(await readData()), "application/json; charset=utf-8");
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/health") {
+      send(res, 200, JSON.stringify({
+        ok: databaseReady || !requireDatabase,
+        storage: databaseReady ? "postgresql" : "local-file",
+        databaseConfigured: Boolean(databaseUrl),
+        databaseReady,
+        requireDatabase,
+        nodeEnv: process.env.NODE_ENV || ""
+      }), "application/json; charset=utf-8");
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/data") {
+      const body = await readBody(req);
+      const data = await writeData(JSON.parse(body || "{}"));
+      send(res, 200, JSON.stringify({ ok: true, data }), "application/json; charset=utf-8");
+      return;
+    }
+
+    if (req.method !== "GET") {
+      send(res, 405, "Method not allowed");
+      return;
+    }
+
+    const requested = url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname);
+    const filePath = path.normalize(path.join(root, requested));
+    if (!filePath.startsWith(root)) {
+      send(res, 403, "Forbidden");
+      return;
+    }
+
+    fs.readFile(filePath, (error, content) => {
+      if (error) {
+        send(res, 404, "Not found");
+        return;
+      }
+      const type = mimeTypes[path.extname(filePath).toLowerCase()] || "application/octet-stream";
+      send(res, 200, content, type);
+    });
+  } catch (error) {
+    const status = error.statusCode || 500;
+    const message = error.message || "Server error";
+    const type = status >= 400 && status < 500 ? "application/json; charset=utf-8" : "text/plain; charset=utf-8";
+    send(res, status, type.includes("json") ? JSON.stringify({ ok: false, error: message }) : message, type);
+  }
+});
+
+async function initDatabaseWithRetry() {
+  if (!pg && requireDatabase) {
+    throw new Error("PostgreSQL dependency 'pg' is not installed. Check package.json and Render build logs.");
+  }
+  if (!databaseUrl && requireDatabase) {
+    throw new Error("DATABASE_URL is required in production. Set it to the Render Internal Database URL.");
+  }
+  if (!pool) return;
+  const attempts = 8;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await initDatabase();
+      databaseReady = true;
+      return;
+    } catch (error) {
+      console.error(`Database connection attempt ${attempt}/${attempts} failed:`, error.message);
+      if (attempt === attempts) {
+        if (requireDatabase) {
+          throw new Error("Database unavailable after retries. Check DATABASE_URL and database status in Render.");
+        }
+        console.error("Database unavailable. Starting with local file storage fallback.");
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, attempt * 2500));
+    }
+  }
+}
+
+initDatabaseWithRetry()
+  .then(() => {
+    server.listen(port, host, () => {
+      const storage = databaseReady ? "PostgreSQL" : "local file";
+      console.log(`Truck Stop POS server running at http://${host}:${port} using ${storage} storage`);
+    });
+  })
+  .catch((error) => {
+    console.error("Failed to start POS server:", error);
+    process.exit(1);
+  });
