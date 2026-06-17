@@ -96,6 +96,7 @@
           <strong id="lowStockCount">0</strong>
         </div>
         <button class="secondary-button admin-only" id="historyBtn" type="button">History</button>
+        <button class="secondary-button admin-only" id="tillBtn" type="button">Till</button>
         <button class="secondary-button admin-only" id="customersBtn" type="button">Customers</button>
         <button class="secondary-button admin-only" id="paymentsBtn" type="button">Payments</button>
         <button class="secondary-button admin-only" id="statementsBtn" type="button">Statements</button>
@@ -139,6 +140,35 @@
         </div>
       </div>
       <div id="historyList" class="record-list"></div>
+    </dialog>
+
+    <dialog id="tillDialog">
+      <div class="modal-head">
+        <h2>Till Control</h2>
+        <button class="icon-button" id="closeTillBtn" type="button" title="Close">X</button>
+      </div>
+      <div class="item-form">
+        <div class="item-form-grid">
+          <div class="metric">
+            <span>Cash on hand</span>
+            <strong id="cashTillBalance">R0.00</strong>
+          </div>
+          <div class="metric">
+            <span>Card/swipe total</span>
+            <strong id="cardTillBalance">R0.00</strong>
+          </div>
+        </div>
+      </div>
+      <form class="item-form" id="tillCollectionForm">
+        <h3>Record Collection</h3>
+        <div class="item-form-grid">
+          <label><span>Type</span><select id="tillCollectionMethod"><option>Cash</option><option>Card</option></select></label>
+          <label><span>Amount</span><input id="tillCollectionAmount" type="number" min="0.01" step="0.01" required /></label>
+          <label><span>Reference / Notes</span><input id="tillCollectionNote" type="text" /></label>
+        </div>
+        <button class="primary-button" type="submit">Save Collection</button>
+      </form>
+      <div id="tillCollectionsList" class="record-list"></div>
     </dialog>
 
     <dialog id="customersDialog">
