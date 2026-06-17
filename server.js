@@ -69,6 +69,59 @@ function deletedIdsFrom(...snapshots) {
   return Array.from(new Set(snapshots.flatMap((snapshot) => snapshot?.["truck-pos-deleted-payments"] || [])));
 }
 
+function appError(message, statusCode = 400) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
+function tillBalance(data, method) {
+  const sales = (data?.["truck-pos-transactions"] || [])
+    .filter((transaction) => transaction.status !== "void" && transaction.paymentMethod === method)
+    .reduce((sum, transaction) => sum + Number(transaction.totals?.total || 0), 0);
+  const collections = (data?.["truck-pos-collections"] || [])
+    .filter((collection) => collection.method === method)
+    .reduce((sum, collection) => sum + Number(collection.amount || 0), 0);
+  return sales - collections;
+}
+
+function money(value) {
+  return `R${Number(value || 0).toFixed(2)}`;
+}
+
+function validateNewCollections(incoming, existing) {
+  const incomingData = incoming || {};
+  const existingData = existing || {};
+  const existingCollectionIds = new Set((existingData["truck-pos-collections"] || []).map((collection) => collection.id));
+  const newCollections = (incomingData["truck-pos-collections"] || [])
+    .filter((collection) => collection?.id && !existingCollectionIds.has(collection.id))
+    .sort((a, b) => itemTime(a) - itemTime(b));
+  if (!newCollections.length) return;
+
+  const balanceData = {
+    ...existingData,
+    ...incomingData,
+    "truck-pos-transactions": mergeById(incomingData["truck-pos-transactions"], existingData["truck-pos-transactions"]),
+    "truck-pos-collections": existingData["truck-pos-collections"] || []
+  };
+  const balances = {
+    Cash: tillBalance(balanceData, "Cash"),
+    Card: tillBalance(balanceData, "Card")
+  };
+
+  newCollections.forEach((collection) => {
+    const method = collection.method;
+    const amount = Number(collection.amount || 0);
+    if (!["Cash", "Card"].includes(method) || amount <= 0) {
+      throw appError("Invalid till collection. Please check the type and amount.", 409);
+    }
+    if (amount > balances[method] + 0.005) {
+      throw appError(`${method} collection blocked. Available ${method.toLowerCase()} balance is ${money(Math.max(0, balances[method]))}. Refresh Till and try again.`, 409);
+    }
+    balances[method] -= amount;
+  });
+}
+
 function mergeData(incoming, existing) {
   const incomingData = incoming || {};
   const existingData = existing || {};
@@ -122,20 +175,34 @@ async function writeData(data) {
     throw new Error("Database is required but not connected");
   }
   if (!pool || !databaseReady) {
-    const merged = mergeData(data, readFileData());
+    const existing = readFileData();
+    validateNewCollections(data, existing);
+    const merged = mergeData(data, existing);
     writeFileData(merged);
     return merged;
   }
-  const existing = await readData();
-  const merged = mergeData(data, existing);
-  await pool.query(
-    `insert into pos_store (id, data, updated_at)
-     values ($1, $2::jsonb, now())
-     on conflict (id)
-     do update set data = excluded.data, updated_at = now()`,
-    ["main", JSON.stringify(merged)]
-  );
-  return merged;
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const result = await client.query("select data from pos_store where id = $1 for update", ["main"]);
+    const existing = result.rows[0]?.data || {};
+    validateNewCollections(data, existing);
+    const merged = mergeData(data, existing);
+    await client.query(
+      `insert into pos_store (id, data, updated_at)
+       values ($1, $2::jsonb, now())
+       on conflict (id)
+       do update set data = excluded.data, updated_at = now()`,
+      ["main", JSON.stringify(merged)]
+    );
+    await client.query("commit");
+    return merged;
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 function send(res, status, body, type = "text/plain; charset=utf-8") {
@@ -215,7 +282,10 @@ const server = http.createServer(async (req, res) => {
       send(res, 200, content, type);
     });
   } catch (error) {
-    send(res, 500, error.message || "Server error");
+    const status = error.statusCode || 500;
+    const message = error.message || "Server error";
+    const type = status >= 400 && status < 500 ? "application/json; charset=utf-8" : "text/plain; charset=utf-8";
+    send(res, status, type.includes("json") ? JSON.stringify({ ok: false, error: message }) : message, type);
   }
 });
 
