@@ -100,6 +100,8 @@
     tillCollectionMethod: document.querySelector("#tillCollectionMethod"),
     tillCollectionAmount: document.querySelector("#tillCollectionAmount"),
     tillCollectionNote: document.querySelector("#tillCollectionNote"),
+    tillReportMonth: document.querySelector("#tillReportMonth"),
+    downloadTillReportBtn: document.querySelector("#downloadTillReportBtn"),
     tillCollectionsList: document.querySelector("#tillCollectionsList"),
     customersDialog: document.querySelector("#customersDialog"),
     customersBtn: document.querySelector("#customersBtn"),
@@ -292,8 +294,8 @@
         body: JSON.stringify(data),
         keepalive: true
       });
-      if (!response.ok) throw new Error("Could not save data to the server.");
       const result = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(result?.error || "Could not save data to the server.");
       if (result?.data) applySnapshot(result.data);
     }
     return true;
@@ -304,7 +306,7 @@
       await saveAll();
       return true;
     } catch (error) {
-      window.alert(message || "This change could not be saved yet. Please try again.");
+      window.alert(error.message || message || "This change could not be saved yet. Please try again.");
       return false;
     }
   }
@@ -663,6 +665,7 @@
     const balances = currentTillBalance();
     els.cashTillBalance.textContent = money(balances.Cash);
     els.cardTillBalance.textContent = money(balances.Card);
+    if (!els.tillReportMonth.value) els.tillReportMonth.value = new Date().toISOString().slice(0, 7);
     setTillDefaultAmount();
     els.tillCollectionsList.innerHTML = state.collections.length ? state.collections.map((collection) => `
       <div class="record">
@@ -673,9 +676,16 @@
   }
 
   async function addTillCollection() {
+    await refreshFromServer();
     const method = els.tillCollectionMethod.value;
     const amount = Number(els.tillCollectionAmount.value || 0);
     if (!["Cash", "Card"].includes(method) || amount <= 0) return;
+    const available = currentTillBalance()[method] || 0;
+    if (amount > available + 0.005) {
+      window.alert(`${method} collection blocked. Available ${method.toLowerCase()} balance is ${money(Math.max(0, available))}.`);
+      renderTill();
+      return;
+    }
     const collection = {
       id: uid("T"),
       type: "collection",
@@ -692,6 +702,103 @@
       return;
     }
     renderTill();
+  }
+
+  function monthRange(monthValue) {
+    const value = monthValue || new Date().toISOString().slice(0, 7);
+    const [year, month] = value.split("-").map(Number);
+    const start = new Date(year, month - 1, 1);
+    const end = new Date(year, month, 1);
+    return { value, start, end, label: start.toLocaleString(undefined, { month: "long", year: "numeric" }) };
+  }
+
+  function tillEvents() {
+    const sales = state.transactions
+      .filter((transaction) => transaction.status !== "void" && ["Cash", "Card"].includes(transaction.paymentMethod))
+      .map((transaction) => ({
+        date: transaction.date,
+        type: "Sale",
+        method: transaction.paymentMethod,
+        ref: transaction.id,
+        description: transaction.customerName,
+        amount: Number(transaction.totals.total || 0)
+      }));
+    const collections = state.collections.map((collection) => ({
+      date: collection.date,
+      type: "Collection",
+      method: collection.method,
+      ref: collection.id,
+      description: collection.note || "",
+      amount: -Number(collection.amount || 0)
+    }));
+    return sales.concat(collections).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  }
+
+  function tillReportRows(monthValue) {
+    const range = monthRange(monthValue);
+    const rows = [
+      ["Till Monthly Report", range.label],
+      ["Store", state.settings.storeName],
+      ["Generated", new Date().toLocaleString()],
+      [],
+      ["Summary", "Cash", "Card", "Total"]
+    ];
+    let openingCash = 0;
+    let openingCard = 0;
+    let cashBalance = 0;
+    let cardBalance = 0;
+    const events = tillEvents();
+    events.forEach((event) => {
+      const date = new Date(event.date);
+      if (date < range.start) {
+        if (event.method === "Cash") openingCash += event.amount;
+        if (event.method === "Card") openingCard += event.amount;
+      }
+    });
+    cashBalance = openingCash;
+    cardBalance = openingCard;
+    const monthlyEvents = events.filter((event) => {
+      const date = new Date(event.date);
+      return date >= range.start && date < range.end;
+    });
+    const monthCashIn = monthlyEvents.filter((event) => event.method === "Cash" && event.amount > 0).reduce((sum, event) => sum + event.amount, 0);
+    const monthCardIn = monthlyEvents.filter((event) => event.method === "Card" && event.amount > 0).reduce((sum, event) => sum + event.amount, 0);
+    const monthCashOut = monthlyEvents.filter((event) => event.method === "Cash" && event.amount < 0).reduce((sum, event) => sum + Math.abs(event.amount), 0);
+    const monthCardOut = monthlyEvents.filter((event) => event.method === "Card" && event.amount < 0).reduce((sum, event) => sum + Math.abs(event.amount), 0);
+    rows.push(
+      ["Opening Balance", openingCash, openingCard, openingCash + openingCard],
+      ["Sales Captured", monthCashIn, monthCardIn, monthCashIn + monthCardIn],
+      ["Collections / Settlements", monthCashOut, monthCardOut, monthCashOut + monthCardOut],
+      ["Closing Balance", openingCash + monthCashIn - monthCashOut, openingCard + monthCardIn - monthCardOut, openingCash + openingCard + monthCashIn + monthCardIn - monthCashOut - monthCardOut],
+      [],
+      ["Date", "Type", "Method", "Reference", "Customer / Notes", "Cash In", "Cash Out", "Cash Balance", "Card In", "Card Out", "Card Balance"]
+    );
+    monthlyEvents.forEach((event) => {
+      const isCash = event.method === "Cash";
+      const isIn = event.amount > 0;
+      if (isCash) cashBalance += event.amount;
+      else cardBalance += event.amount;
+      rows.push([
+        new Date(event.date).toLocaleString(),
+        event.type,
+        event.method,
+        event.ref,
+        event.description,
+        isCash && isIn ? event.amount : "",
+        isCash && !isIn ? Math.abs(event.amount) : "",
+        cashBalance,
+        !isCash && isIn ? event.amount : "",
+        !isCash && !isIn ? Math.abs(event.amount) : "",
+        cardBalance
+      ]);
+    });
+    return { rows, range };
+  }
+
+  function downloadTillReport() {
+    const report = tillReportRows(els.tillReportMonth.value);
+    const workbook = toExcelWorkbook(report.rows, `Till Report ${report.range.label}`);
+    downloadBlob(workbook, `till-report-${report.range.value}.xls`, "application/vnd.ms-excel");
   }
 
   async function voidSale(id) {
@@ -1214,6 +1321,11 @@
     });
     els.closeTillBtn.addEventListener("click", () => els.tillDialog.close());
     els.tillCollectionMethod.addEventListener("change", setTillDefaultAmount);
+    els.downloadTillReportBtn.addEventListener("click", async () => {
+      await refreshFromServer();
+      renderTill();
+      downloadTillReport();
+    });
     els.tillCollectionForm.addEventListener("submit", (event) => {
       event.preventDefault();
       void addTillCollection();
