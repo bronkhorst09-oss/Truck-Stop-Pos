@@ -50,6 +50,7 @@
     search: "",
     paymentMethod: "Cash",
     currentUser: null,
+    sessionToken: sessionStorage.getItem("truck-pos-session-token") || "",
     selectedCustomerId: ""
   };
 
@@ -291,7 +292,10 @@
     if (canSaveToServer()) {
       const response = await fetch("/api/data", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(state.sessionToken ? { Authorization: `Bearer ${state.sessionToken}` } : {})
+        },
         body: JSON.stringify(data),
         keepalive: true
       });
@@ -337,7 +341,10 @@
   async function refreshFromServer() {
     if (!canSaveToServer()) return false;
     try {
-      const response = await fetch(`/api/data?sync=${Date.now()}`, { cache: "no-store" });
+      const response = await fetch(`/api/data?sync=${Date.now()}`, {
+        cache: "no-store",
+        headers: state.sessionToken ? { Authorization: `Bearer ${state.sessionToken}` } : {}
+      });
       if (!response.ok) throw new Error("Could not load latest server data.");
       applySnapshot(await response.json());
       return true;
@@ -413,8 +420,22 @@
     document.body.classList.toggle("is-admin", isAdmin);
   }
 
-  function login(role) {
+  async function serverLogin(pin, recovery = false) {
+    const response = await fetch("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin, recovery })
+    });
+    const result = await response.json().catch(() => null);
+    if (!response.ok || !result?.ok) throw new Error(result?.error || "Incorrect PIN.");
+    return result;
+  }
+
+  function login(role, token, data) {
     state.currentUser = role;
+    state.sessionToken = token || "";
+    if (state.sessionToken) sessionStorage.setItem("truck-pos-session-token", state.sessionToken);
+    if (data) applySnapshot(data);
     els.loginScreen.classList.add("hidden");
     els.appShell.classList.remove("hidden");
     applyRole();
@@ -423,6 +444,8 @@
 
   function logout() {
     state.currentUser = null;
+    state.sessionToken = "";
+    sessionStorage.removeItem("truck-pos-session-token");
     state.cart = [];
     state.selectedCustomerId = "";
     els.pinInput.value = "";
@@ -1244,17 +1267,27 @@
   }
 
   function bindEvents() {
-    els.loginForm.addEventListener("submit", (event) => {
+    els.loginForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       const pin = els.pinInput.value.trim();
-      if (pin === state.settings.adminPin) login("admin");
-      else if (pin === state.settings.staffPin) login("staff");
-      else els.loginMessage.textContent = "Incorrect PIN.";
+      els.loginMessage.textContent = "";
+      try {
+        const result = await serverLogin(pin);
+        login(result.role, result.token, result.data);
+      } catch (error) {
+        els.loginMessage.textContent = error.message || "Incorrect PIN.";
+      }
     });
-    els.recoveryBtn.addEventListener("click", () => {
+    els.recoveryBtn.addEventListener("click", async () => {
       const pin = window.prompt("Enter recovery PIN");
-      if (pin === state.settings.recoveryPin) login("admin");
-      else els.loginMessage.textContent = "Incorrect recovery PIN.";
+      if (!pin) return;
+      els.loginMessage.textContent = "";
+      try {
+        const result = await serverLogin(pin, true);
+        login(result.role, result.token, result.data);
+      } catch (error) {
+        els.loginMessage.textContent = error.message || "Incorrect recovery PIN.";
+      }
     });
     els.logoutBtn.addEventListener("click", logout);
     els.categoryTabs.addEventListener("click", (event) => {
@@ -1425,24 +1458,21 @@
   }
 
   function init() {
-    let normalized = false;
     if (!state.settings.currency || state.settings.currency === "$") {
       state.settings.currency = "R";
-      normalized = true;
     }
     bindEvents();
     renderAll();
     tickClock();
     setInterval(tickClock, 30000);
     els.pinInput.focus();
-    if (normalized) void saveAll().catch(() => {});
     window.addEventListener("beforeunload", () => {
       const data = currentData();
       try {
         localStorage.setItem("truck-pos-backup", JSON.stringify(data));
       } catch (error) {}
-      if (canSaveToServer() && navigator.sendBeacon) {
-        navigator.sendBeacon("/api/data", new Blob([JSON.stringify(data)], { type: "application/json" }));
+      if (canSaveToServer() && navigator.sendBeacon && state.sessionToken) {
+        navigator.sendBeacon("/api/data", new Blob([JSON.stringify({ token: state.sessionToken, data })], { type: "application/json" }));
       }
     });
   }
