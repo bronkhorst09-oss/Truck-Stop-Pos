@@ -48,6 +48,46 @@ function writeFileData(data) {
   fs.renameSync(tmp, dataFile);
 }
 
+function itemTime(item) {
+  return Date.parse(item?.updatedAt || item?.voidedAt || item?.deletedAt || item?.date || "") || 0;
+}
+
+function mergeById(incomingList, existingList) {
+  const merged = new Map();
+  [...(Array.isArray(existingList) ? existingList : []), ...(Array.isArray(incomingList) ? incomingList : [])].forEach((item) => {
+    if (!item) return;
+    const key = item.id || JSON.stringify(item);
+    const current = merged.get(key);
+    if (!current || itemTime(item) >= itemTime(current)) {
+      merged.set(key, item);
+    }
+  });
+  return Array.from(merged.values()).sort((a, b) => itemTime(b) - itemTime(a));
+}
+
+function deletedIdsFrom(...snapshots) {
+  return Array.from(new Set(snapshots.flatMap((snapshot) => snapshot?.["truck-pos-deleted-payments"] || [])));
+}
+
+function mergeData(incoming, existing) {
+  const incomingData = incoming || {};
+  const existingData = existing || {};
+  const deletedPayments = deletedIdsFrom(incomingData, existingData);
+  return {
+    ...existingData,
+    ...incomingData,
+    "truck-pos-transactions": mergeById(incomingData["truck-pos-transactions"], existingData["truck-pos-transactions"]),
+    "truck-pos-payments": mergeById(incomingData["truck-pos-payments"], existingData["truck-pos-payments"]).filter((payment) => !deletedPayments.includes(payment.id)),
+    "truck-pos-deleted-payments": deletedPayments,
+    "truck-pos-collections": mergeById(incomingData["truck-pos-collections"], existingData["truck-pos-collections"]),
+    "truck-pos-meta": {
+      ...(existingData["truck-pos-meta"] || {}),
+      ...(incomingData["truck-pos-meta"] || {}),
+      lastSavedAt: new Date().toISOString()
+    }
+  };
+}
+
 async function initDatabase() {
   if (!pool) return;
   await pool.query(`
@@ -60,7 +100,11 @@ async function initDatabase() {
 
   const existing = await pool.query("select id from pos_store where id = $1", ["main"]);
   if (!existing.rowCount) {
-    await writeData(readFileData());
+    await pool.query(
+      `insert into pos_store (id, data, updated_at)
+       values ($1, $2::jsonb, now())`,
+      ["main", JSON.stringify(readFileData())]
+    );
   }
 }
 
@@ -78,16 +122,20 @@ async function writeData(data) {
     throw new Error("Database is required but not connected");
   }
   if (!pool || !databaseReady) {
-    writeFileData(data);
-    return;
+    const merged = mergeData(data, readFileData());
+    writeFileData(merged);
+    return merged;
   }
+  const existing = await readData();
+  const merged = mergeData(data, existing);
   await pool.query(
     `insert into pos_store (id, data, updated_at)
      values ($1, $2::jsonb, now())
      on conflict (id)
      do update set data = excluded.data, updated_at = now()`,
-    ["main", JSON.stringify(data)]
+    ["main", JSON.stringify(merged)]
   );
+  return merged;
 }
 
 function send(res, status, body, type = "text/plain; charset=utf-8") {
@@ -141,8 +189,8 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/api/data") {
       const body = await readBody(req);
-      await writeData(JSON.parse(body || "{}"));
-      send(res, 200, JSON.stringify({ ok: true }), "application/json; charset=utf-8");
+      const data = await writeData(JSON.parse(body || "{}"));
+      send(res, 200, JSON.stringify({ ok: true, data }), "application/json; charset=utf-8");
       return;
     }
 
