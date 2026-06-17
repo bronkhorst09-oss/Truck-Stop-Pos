@@ -1,4 +1,5 @@
 const http = require("http");
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 let pg = null;
@@ -22,6 +23,8 @@ const pool = useDatabase ? new pg.Pool({
   ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : undefined
 }) : null;
 let databaseReady = false;
+const sessions = new Map();
+const sessionDurationMs = 12 * 60 * 60 * 1000;
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -87,6 +90,44 @@ function tillBalance(data, method) {
 
 function money(value) {
   return `R${Number(value || 0).toFixed(2)}`;
+}
+
+function defaultSettings(data) {
+  return {
+    adminPin: "1234",
+    staffPin: "0000",
+    recoveryPin: "9999",
+    ...(data?.["truck-pos-settings"] || {})
+  };
+}
+
+function createSession(role) {
+  const token = crypto.randomBytes(32).toString("hex");
+  sessions.set(token, { role, expiresAt: Date.now() + sessionDurationMs });
+  return token;
+}
+
+function sessionFromToken(token) {
+  const session = token ? sessions.get(token) : null;
+  if (!session) return null;
+  if (session.expiresAt < Date.now()) {
+    sessions.delete(token);
+    return null;
+  }
+  session.expiresAt = Date.now() + sessionDurationMs;
+  return session;
+}
+
+function tokenFromRequest(req, parsedBody) {
+  const auth = req.headers.authorization || "";
+  if (auth.toLowerCase().startsWith("bearer ")) return auth.slice(7).trim();
+  return parsedBody?.token || parsedBody?.__sessionToken || "";
+}
+
+function requireSession(req, parsedBody) {
+  const session = sessionFromToken(tokenFromRequest(req, parsedBody));
+  if (!session) throw appError("Please log in again.", 401);
+  return session;
 }
 
 function validateNewCollections(incoming, existing) {
@@ -233,11 +274,27 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
 
     if (req.method === "GET" && url.pathname === "/app-data.js") {
-      send(res, 200, `window.__POS_DATA__ = ${JSON.stringify(await readData())};`, "application/javascript; charset=utf-8");
+      send(res, 200, "window.__POS_DATA__ = {};", "application/javascript; charset=utf-8");
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/login") {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const data = await readData();
+      const settings = defaultSettings(data);
+      const pin = String(body.pin || "").trim();
+      const recovery = Boolean(body.recovery);
+      let role = "";
+      if (recovery && pin === String(settings.recoveryPin || "")) role = "admin";
+      else if (pin === String(settings.adminPin || "")) role = "admin";
+      else if (!recovery && pin === String(settings.staffPin || "")) role = "staff";
+      if (!role) throw appError("Incorrect PIN.", 401);
+      send(res, 200, JSON.stringify({ ok: true, role, token: createSession(role), data }), "application/json; charset=utf-8");
       return;
     }
 
     if (req.method === "GET" && url.pathname === "/api/data") {
+      requireSession(req);
       send(res, 200, JSON.stringify(await readData()), "application/json; charset=utf-8");
       return;
     }
@@ -255,8 +312,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "POST" && url.pathname === "/api/data") {
-      const body = await readBody(req);
-      const data = await writeData(JSON.parse(body || "{}"));
+      const body = JSON.parse(await readBody(req) || "{}");
+      requireSession(req, body);
+      const data = await writeData(body.data || body);
       send(res, 200, JSON.stringify({ ok: true, data }), "application/json; charset=utf-8");
       return;
     }
