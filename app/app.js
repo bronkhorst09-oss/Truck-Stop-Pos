@@ -156,6 +156,7 @@
     staffPinInput: document.querySelector("#staffPinInput"),
     recoveryPinInput: document.querySelector("#recoveryPinInput"),
     footerInput: document.querySelector("#footerInput"),
+    downloadBackupBtn: document.querySelector("#downloadBackupBtn"),
     shiftClock: document.querySelector("#shiftClock"),
     shiftSales: document.querySelector("#shiftSales"),
     transactionCount: document.querySelector("#transactionCount"),
@@ -954,6 +955,13 @@
     downloadBlob(workbook, `sales-history-${label}-${today}.xls`, "application/vnd.ms-excel");
   }
 
+  async function downloadFullBackup() {
+    await refreshFromServer();
+    const data = currentData();
+    const stamp = new Date().toISOString().replaceAll(":", "-").slice(0, 19);
+    downloadBlob(JSON.stringify(data, null, 2), `truck-stop-pos-backup-${stamp}.json`, "application/json");
+  }
+
   function statementRows(statement) {
     return [["Date", "Description", "Reference", "Debit", "Credit", "Balance"]].concat(statement.rows.map((row) => [
       row.date ? new Date(row.date).toLocaleDateString() : "",
@@ -1394,6 +1402,9 @@
       els.settingsDialog.showModal();
     });
     els.closeSettingsBtn.addEventListener("click", () => els.settingsDialog.close());
+    els.downloadBackupBtn.addEventListener("click", () => {
+      void downloadFullBackup();
+    });
     els.settingsForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       const previous = { ...state.settings };
