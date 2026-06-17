@@ -1,7 +1,7 @@
 (function () {
   const categories = ["All", "Fuel", "Food", "Drinks", "Truck", "Service"];
   const editableCategories = categories.filter((category) => category !== "All");
-  const paymentMethods = ["Cash", "Card", "Fleet", "Account"];
+  const paymentMethods = ["Cash", "Card", "Account"];
 
   const defaultProducts = [
     { id: "diesel", name: "Diesel 50PPM", category: "Fuel", price: 28.68, unit: "L", stock: 9999, sku: "FUEL-D50", taxable: false },
@@ -17,6 +17,8 @@
     "truck-pos-products",
     "truck-pos-transactions",
     "truck-pos-payments",
+    "truck-pos-deleted-payments",
+    "truck-pos-collections",
     "truck-pos-customers",
     "truck-pos-settings",
     "truck-pos-meta"
@@ -29,6 +31,8 @@
     products: migrateProducts(load("truck-pos-products", defaultProducts)),
     transactions: load("truck-pos-transactions", []),
     payments: load("truck-pos-payments", []),
+    deletedPaymentIds: load("truck-pos-deleted-payments", []),
+    collections: load("truck-pos-collections", []),
     customers: migrateCustomers(load("truck-pos-customers", defaultCustomers)),
     settings: {
       storeName: "Truck Stop POS",
@@ -87,6 +91,16 @@
     historyStatusInput: document.querySelector("#historyStatusInput"),
     downloadSelectedHistoryBtn: document.querySelector("#downloadSelectedHistoryBtn"),
     downloadAllHistoryBtn: document.querySelector("#downloadAllHistoryBtn"),
+    tillDialog: document.querySelector("#tillDialog"),
+    tillBtn: document.querySelector("#tillBtn"),
+    closeTillBtn: document.querySelector("#closeTillBtn"),
+    cashTillBalance: document.querySelector("#cashTillBalance"),
+    cardTillBalance: document.querySelector("#cardTillBalance"),
+    tillCollectionForm: document.querySelector("#tillCollectionForm"),
+    tillCollectionMethod: document.querySelector("#tillCollectionMethod"),
+    tillCollectionAmount: document.querySelector("#tillCollectionAmount"),
+    tillCollectionNote: document.querySelector("#tillCollectionNote"),
+    tillCollectionsList: document.querySelector("#tillCollectionsList"),
     customersDialog: document.querySelector("#customersDialog"),
     customersBtn: document.querySelector("#customersBtn"),
     closeCustomersBtn: document.querySelector("#closeCustomersBtn"),
@@ -183,8 +197,19 @@
     });
   }
 
+  function itemTime(item) {
+    return Date.parse(item?.updatedAt || item?.voidedAt || item?.deletedAt || item?.date || "") || 0;
+  }
+
   function mergeList(newerList, olderList) {
-    return uniqueById([...(Array.isArray(newerList) ? newerList : []), ...(Array.isArray(olderList) ? olderList : [])]);
+    const merged = new Map();
+    [...(Array.isArray(olderList) ? olderList : []), ...(Array.isArray(newerList) ? newerList : [])].forEach((item) => {
+      if (!item) return;
+      const key = item.id || JSON.stringify(item);
+      const current = merged.get(key);
+      if (!current || itemTime(item) >= itemTime(current)) merged.set(key, item);
+    });
+    return Array.from(merged.values()).sort((a, b) => itemTime(b) - itemTime(a));
   }
 
   function pickValue(primaryValue, secondaryValue, fallback) {
@@ -203,10 +228,13 @@
     const newer = firstTime >= secondTime ? first : second;
     const older = newer === first ? second : first;
     const latestTime = Math.max(firstTime, secondTime);
+    const deletedPayments = uniqueById([...(newer["truck-pos-deleted-payments"] || []), ...(older["truck-pos-deleted-payments"] || [])]);
     return {
       "truck-pos-products": pickValue(newer["truck-pos-products"], older["truck-pos-products"], defaultProducts),
       "truck-pos-transactions": mergeList(newer["truck-pos-transactions"], older["truck-pos-transactions"]),
-      "truck-pos-payments": mergeList(newer["truck-pos-payments"], older["truck-pos-payments"]),
+      "truck-pos-payments": mergeList(newer["truck-pos-payments"], older["truck-pos-payments"]).filter((payment) => !deletedPayments.includes(payment.id)),
+      "truck-pos-deleted-payments": deletedPayments,
+      "truck-pos-collections": mergeList(newer["truck-pos-collections"], older["truck-pos-collections"]),
       "truck-pos-customers": mergeList(newer["truck-pos-customers"], older["truck-pos-customers"]),
       "truck-pos-settings": pickValue(newer["truck-pos-settings"], older["truck-pos-settings"], {}),
       "truck-pos-meta": {
@@ -237,10 +265,17 @@
       "truck-pos-products": state.products,
       "truck-pos-transactions": state.transactions,
       "truck-pos-payments": state.payments,
+      "truck-pos-deleted-payments": state.deletedPaymentIds,
+      "truck-pos-collections": state.collections,
       "truck-pos-customers": state.customers,
       "truck-pos-settings": state.settings,
       "truck-pos-meta": state.meta
     };
+  }
+
+  function saveDataLocally(data) {
+    Object.entries(data).forEach(([key, value]) => save(key, value));
+    save("truck-pos-backup", data);
   }
 
   function canSaveToServer() {
@@ -249,8 +284,7 @@
 
   async function saveAll() {
     const data = currentData();
-    Object.entries(data).forEach(([key, value]) => save(key, value));
-    save("truck-pos-backup", data);
+    saveDataLocally(data);
     if (canSaveToServer()) {
       const response = await fetch("/api/data", {
         method: "POST",
@@ -259,6 +293,8 @@
         keepalive: true
       });
       if (!response.ok) throw new Error("Could not save data to the server.");
+      const result = await response.json().catch(() => null);
+      if (result?.data) applySnapshot(result.data);
     }
     return true;
   }
@@ -269,6 +305,40 @@
       return true;
     } catch (error) {
       window.alert(message || "This change could not be saved yet. Please try again.");
+      return false;
+    }
+  }
+
+  function applySnapshot(snapshot) {
+    const merged = mergeSnapshots(snapshot, currentData());
+    state.products = migrateProducts(merged["truck-pos-products"] || defaultProducts);
+    state.transactions = merged["truck-pos-transactions"] || [];
+    state.payments = merged["truck-pos-payments"] || [];
+    state.deletedPaymentIds = merged["truck-pos-deleted-payments"] || [];
+    state.collections = merged["truck-pos-collections"] || [];
+    state.customers = migrateCustomers(merged["truck-pos-customers"] || defaultCustomers);
+    state.settings = {
+      storeName: "Truck Stop POS",
+      currency: "R",
+      footer: "Drive safe. Thank you.",
+      taxRate: 15,
+      adminPin: "1234",
+      staffPin: "0000",
+      recoveryPin: "9999",
+      ...(merged["truck-pos-settings"] || {})
+    };
+    state.meta = merged["truck-pos-meta"] || { lastSavedAt: null };
+    saveDataLocally(currentData());
+  }
+
+  async function refreshFromServer() {
+    if (!canSaveToServer()) return false;
+    try {
+      const response = await fetch(`/api/data?sync=${Date.now()}`, { cache: "no-store" });
+      if (!response.ok) throw new Error("Could not load latest server data.");
+      applySnapshot(await response.json());
+      return true;
+    } catch (error) {
       return false;
     }
   }
@@ -330,7 +400,7 @@
 
   function allowedPaymentMethods(customer) {
     if (!customer) return [];
-    return customer.type === "account" ? ["Account"] : ["Cash", "Card", "Fleet"];
+    return customer.type === "account" ? ["Account"] : ["Cash", "Card"];
   }
 
   function applyRole() {
@@ -380,7 +450,7 @@
       els.saleRuleMessage.textContent = "Select a customer before completing the sale.";
       return;
     }
-    els.saleRuleMessage.textContent = customer.type === "account" ? "Account customer: only Account payment is allowed." : "Prepaid customer: Cash, Card, or Fleet only.";
+    els.saleRuleMessage.textContent = customer.type === "account" ? "Account customer: only Account payment is allowed." : "Prepaid customer: Cash or Card only.";
   }
 
   function renderCustomersForSale() {
@@ -564,6 +634,64 @@
         <div>${transaction.lines.map((line) => `${line.qty} ${line.unit} ${escapeHtml(line.name)}`).join(", ")}</div>
         ${transaction.status === "void" ? `<div class="muted">Void reason: ${escapeHtml(transaction.voidReason || "")}</div>` : `<div class="record-actions"><button class="danger-button" data-void-sale="${transaction.id}" type="button">Void Sale</button></div>`}
       </div>`).join("") : '<div class="empty-state">No transactions for this selection.</div>';
+  }
+
+  function tillBalance(method) {
+    const sales = state.transactions
+      .filter((transaction) => transaction.status !== "void" && transaction.paymentMethod === method)
+      .reduce((sum, transaction) => sum + Number(transaction.totals.total || 0), 0);
+    const collected = state.collections
+      .filter((collection) => collection.method === method)
+      .reduce((sum, collection) => sum + Number(collection.amount || 0), 0);
+    return sales - collected;
+  }
+
+  function currentTillBalance() {
+    return {
+      Cash: tillBalance("Cash"),
+      Card: tillBalance("Card")
+    };
+  }
+
+  function setTillDefaultAmount() {
+    const balances = currentTillBalance();
+    const amount = Math.max(0, balances[els.tillCollectionMethod.value] || 0);
+    els.tillCollectionAmount.value = amount ? amount.toFixed(2) : "";
+  }
+
+  function renderTill() {
+    const balances = currentTillBalance();
+    els.cashTillBalance.textContent = money(balances.Cash);
+    els.cardTillBalance.textContent = money(balances.Card);
+    setTillDefaultAmount();
+    els.tillCollectionsList.innerHTML = state.collections.length ? state.collections.map((collection) => `
+      <div class="record">
+        <div class="record-top"><span>${escapeHtml(collection.method)} collection</span><span>${money(collection.amount)}</span></div>
+        <div class="muted">${new Date(collection.date).toLocaleString()} - ${escapeHtml(collection.userRole || "admin")}</div>
+        <div>${escapeHtml(collection.note || "")}</div>
+      </div>`).join("") : '<div class="empty-state">No collections recorded yet.</div>';
+  }
+
+  async function addTillCollection() {
+    const method = els.tillCollectionMethod.value;
+    const amount = Number(els.tillCollectionAmount.value || 0);
+    if (!["Cash", "Card"].includes(method) || amount <= 0) return;
+    const collection = {
+      id: uid("T"),
+      type: "collection",
+      date: new Date().toISOString(),
+      method,
+      amount,
+      note: els.tillCollectionNote.value.trim(),
+      userRole: state.currentUser
+    };
+    state.collections.unshift(collection);
+    els.tillCollectionForm.reset();
+    if (!(await persistChange("Till collection was not saved. Please try again."))) {
+      state.collections = state.collections.filter((item) => item.id !== collection.id);
+      return;
+    }
+    renderTill();
   }
 
   async function voidSale(id) {
@@ -861,9 +989,12 @@
     if (!payment) return;
     if (!window.confirm(`Delete payment for ${payment.customerName} - ${money(payment.amount)}?`)) return;
     const previousPayments = state.payments.slice();
+    const previousDeletedPaymentIds = state.deletedPaymentIds.slice();
     state.payments = state.payments.filter((item) => item.id !== id);
+    state.deletedPaymentIds = uniqueById([...state.deletedPaymentIds, id]);
     if (!(await persistChange("Payment deletion was not saved. Please try again."))) {
       state.payments = previousPayments;
+      state.deletedPaymentIds = previousDeletedPaymentIds;
       return;
     }
     renderPayments();
@@ -1063,7 +1194,8 @@
       els.receiptDialog.close();
       resetSale();
     });
-    els.historyBtn.addEventListener("click", () => {
+    els.historyBtn.addEventListener("click", async () => {
+      await refreshFromServer();
       renderHistory();
       els.historyDialog.showModal();
     });
@@ -1074,6 +1206,17 @@
     els.historyList.addEventListener("click", (event) => {
       const button = event.target.closest("[data-void-sale]");
       if (button) void voidSale(button.dataset.voidSale);
+    });
+    els.tillBtn.addEventListener("click", async () => {
+      await refreshFromServer();
+      renderTill();
+      els.tillDialog.showModal();
+    });
+    els.closeTillBtn.addEventListener("click", () => els.tillDialog.close());
+    els.tillCollectionMethod.addEventListener("change", setTillDefaultAmount);
+    els.tillCollectionForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void addTillCollection();
     });
     els.customersBtn.addEventListener("click", () => {
       renderCustomers();
@@ -1093,7 +1236,8 @@
       const button = event.target.closest("[data-delete-customer]");
       if (button) void removeCustomer(button.dataset.deleteCustomer);
     });
-    els.paymentsBtn.addEventListener("click", () => {
+    els.paymentsBtn.addEventListener("click", async () => {
+      await refreshFromServer();
       renderPayments();
       els.paymentsDialog.showModal();
     });
@@ -1106,7 +1250,8 @@
       const button = event.target.closest("[data-delete-payment]");
       if (button) void deletePayment(button.dataset.deletePayment);
     });
-    els.statementsBtn.addEventListener("click", () => {
+    els.statementsBtn.addEventListener("click", async () => {
+      await refreshFromServer();
       renderStatementSelectors();
       els.statementsDialog.showModal();
     });
