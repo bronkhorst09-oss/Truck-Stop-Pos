@@ -301,7 +301,7 @@
       });
       const result = await response.json().catch(() => null);
       if (!response.ok) throw new Error(result?.error || "Could not save data to the server.");
-      if (result?.data) applySnapshot(result.data);
+      if (result?.data) applySnapshot(result.data, true);
     }
     return true;
   }
@@ -316,8 +316,8 @@
     }
   }
 
-  function applySnapshot(snapshot) {
-    const merged = mergeSnapshots(snapshot, currentData());
+  function applySnapshot(snapshot, preferServer = false) {
+    const merged = preferServer ? mergeSnapshots(currentData(), snapshot) : mergeSnapshots(snapshot, currentData());
     state.products = migrateProducts(merged["truck-pos-products"] || defaultProducts);
     state.transactions = merged["truck-pos-transactions"] || [];
     state.payments = merged["truck-pos-payments"] || [];
@@ -346,7 +346,7 @@
         headers: state.sessionToken ? { Authorization: `Bearer ${state.sessionToken}` } : {}
       });
       if (!response.ok) throw new Error("Could not load latest server data.");
-      applySnapshot(await response.json());
+      applySnapshot(await response.json(), true);
       return true;
     } catch (error) {
       return false;
@@ -435,7 +435,7 @@
     state.currentUser = role;
     state.sessionToken = token || "";
     if (state.sessionToken) sessionStorage.setItem("truck-pos-session-token", state.sessionToken);
-    if (data) applySnapshot(data);
+    if (data) applySnapshot(data, true);
     els.loginScreen.classList.add("hidden");
     els.appShell.classList.remove("hidden");
     applyRole();
