@@ -51,6 +51,8 @@
     paymentMethod: "Cash",
     currentUser: null,
     sessionToken: sessionStorage.getItem("truck-pos-session-token") || "",
+    syncTimer: null,
+    syncing: false,
     selectedCustomerId: ""
   };
 
@@ -338,8 +340,29 @@
     saveDataLocally(currentData());
   }
 
-  async function refreshFromServer() {
-    if (!canSaveToServer()) return false;
+  function renderOpenAdminPanels() {
+    if (els.historyDialog.open) renderHistory();
+    if (els.tillDialog.open) renderTill();
+    if (els.paymentsDialog.open) renderPayments();
+    if (els.statementsDialog.open) renderStatementSelectors();
+    if (els.customersDialog.open) renderCustomers();
+    if (els.inventoryDialog.open) renderInventory();
+  }
+
+  function renderLiveSync() {
+    renderTabs();
+    renderCustomersForSale();
+    renderProducts();
+    renderMetrics();
+    tickClock();
+    if (!state.cart.length) renderCart();
+    else renderCartTotals();
+    renderOpenAdminPanels();
+  }
+
+  async function refreshFromServer(renderAfter = false) {
+    if (!canSaveToServer() || !state.sessionToken || state.syncing) return false;
+    state.syncing = true;
     try {
       const response = await fetch(`/api/data?sync=${Date.now()}`, {
         cache: "no-store",
@@ -347,9 +370,14 @@
       });
       if (!response.ok) throw new Error("Could not load latest server data.");
       applySnapshot(await response.json(), true);
+      if (renderAfter) {
+        renderLiveSync();
+      }
       return true;
     } catch (error) {
       return false;
+    } finally {
+      state.syncing = false;
     }
   }
 
@@ -440,9 +468,11 @@
     els.appShell.classList.remove("hidden");
     applyRole();
     renderAll();
+    startLiveSync();
   }
 
   function logout() {
+    stopLiveSync();
     state.currentUser = null;
     state.sessionToken = "";
     sessionStorage.removeItem("truck-pos-session-token");
@@ -452,6 +482,20 @@
     els.appShell.classList.add("hidden");
     els.loginScreen.classList.remove("hidden");
     renderCart();
+  }
+
+  function startLiveSync() {
+    stopLiveSync();
+    if (!state.sessionToken) return;
+    state.syncTimer = window.setInterval(() => {
+      void refreshFromServer(true);
+    }, 7000);
+    void refreshFromServer(true);
+  }
+
+  function stopLiveSync() {
+    if (state.syncTimer) window.clearInterval(state.syncTimer);
+    state.syncTimer = null;
   }
 
   function renderTabs() {
@@ -1466,6 +1510,12 @@
     tickClock();
     setInterval(tickClock, 30000);
     els.pinInput.focus();
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) void refreshFromServer(true);
+    });
+    window.addEventListener("focus", () => {
+      void refreshFromServer(true);
+    });
     window.addEventListener("beforeunload", () => {
       const data = currentData();
       try {
