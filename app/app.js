@@ -319,13 +319,15 @@
   }
 
   function applySnapshot(snapshot, preferServer = false) {
-    const merged = preferServer ? mergeSnapshots(currentData(), snapshot) : mergeSnapshots(snapshot, currentData());
-    state.products = migrateProducts(merged["truck-pos-products"] || defaultProducts);
+    const localData = currentData();
+    const merged = mergeSnapshots(snapshot, localData);
+    const source = preferServer ? (snapshot || {}) : merged;
+    state.products = migrateProducts(source["truck-pos-products"] || merged["truck-pos-products"] || defaultProducts);
     state.transactions = merged["truck-pos-transactions"] || [];
     state.payments = merged["truck-pos-payments"] || [];
     state.deletedPaymentIds = merged["truck-pos-deleted-payments"] || [];
     state.collections = merged["truck-pos-collections"] || [];
-    state.customers = migrateCustomers(merged["truck-pos-customers"] || defaultCustomers);
+    state.customers = migrateCustomers(source["truck-pos-customers"] || merged["truck-pos-customers"] || defaultCustomers);
     state.settings = {
       storeName: "Truck Stop POS",
       currency: "R",
@@ -334,9 +336,9 @@
       adminPin: "1234",
       staffPin: "0000",
       recoveryPin: "9999",
-      ...(merged["truck-pos-settings"] || {})
+      ...(source["truck-pos-settings"] || merged["truck-pos-settings"] || {})
     };
-    state.meta = merged["truck-pos-meta"] || { lastSavedAt: null };
+    state.meta = source["truck-pos-meta"] || merged["truck-pos-meta"] || { lastSavedAt: null };
     saveDataLocally(currentData());
   }
 
@@ -1529,3 +1531,4 @@
 
   init();
 })();
+
