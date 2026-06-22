@@ -567,11 +567,12 @@
   function setQty(productId, qty) {
     const line = state.cart.find((item) => item.id === productId);
     if (!line) return;
-    if (qty === "") {
+    const rawQty = String(qty || "").trim();
+    if (rawQty === "") {
       line.qty = "";
       return;
     }
-    const value = Number(qty);
+    const value = Number(rawQty.replace(",", "."));
     if (!Number.isFinite(value)) return;
     line.qty = Math.max(0, value);
   }
@@ -615,7 +616,7 @@
           <div class="cart-detail">${line.qty || 0} ${escapeHtml(line.unit)} x ${money(line.price)} ${line.taxable ? "incl. VAT calc" : "no VAT"}</div>
           <label class="fuel-liters-control">
             <span>${line.category === "Fuel" ? "Liters" : "Qty"}</span>
-            <input data-qty="${line.id}" type="number" min="0" step="${line.category === "Fuel" ? "0.01" : "1"}" inputmode="${line.category === "Fuel" ? "decimal" : "numeric"}" value="${line.qty}" placeholder="Type amount" />
+            <input data-qty="${line.id}" type="text" inputmode="${line.category === "Fuel" ? "decimal" : "numeric"}" pattern="${line.category === "Fuel" ? "[0-9]*[,.]?[0-9]*" : "[0-9]*"}" value="${line.qty}" placeholder="Type amount" />
           </label>
         </div>
         <div>
