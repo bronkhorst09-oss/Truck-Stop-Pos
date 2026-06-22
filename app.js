@@ -1,7 +1,7 @@
 (function () {
   const categories = ["All", "Fuel", "Food", "Drinks", "Truck", "Service"];
   const editableCategories = categories.filter((category) => category !== "All");
-  const paymentMethods = ["Cash", "Card", "Fleet", "Account"];
+  const paymentMethods = ["Cash", "Card", "Account"];
 
   const defaultProducts = [
     { id: "diesel", name: "Diesel 50PPM", category: "Fuel", price: 28.68, unit: "L", stock: 9999, sku: "FUEL-D50", taxable: false },
@@ -17,6 +17,8 @@
     "truck-pos-products",
     "truck-pos-transactions",
     "truck-pos-payments",
+    "truck-pos-deleted-payments",
+    "truck-pos-collections",
     "truck-pos-customers",
     "truck-pos-settings",
     "truck-pos-meta"
@@ -29,6 +31,8 @@
     products: migrateProducts(load("truck-pos-products", defaultProducts)),
     transactions: load("truck-pos-transactions", []),
     payments: load("truck-pos-payments", []),
+    deletedPaymentIds: load("truck-pos-deleted-payments", []),
+    collections: load("truck-pos-collections", []),
     customers: migrateCustomers(load("truck-pos-customers", defaultCustomers)),
     settings: {
       storeName: "Truck Stop POS",
@@ -46,6 +50,9 @@
     search: "",
     paymentMethod: "Cash",
     currentUser: null,
+    sessionToken: sessionStorage.getItem("truck-pos-session-token") || "",
+    syncTimer: null,
+    syncing: false,
     selectedCustomerId: ""
   };
 
@@ -87,6 +94,18 @@
     historyStatusInput: document.querySelector("#historyStatusInput"),
     downloadSelectedHistoryBtn: document.querySelector("#downloadSelectedHistoryBtn"),
     downloadAllHistoryBtn: document.querySelector("#downloadAllHistoryBtn"),
+    tillDialog: document.querySelector("#tillDialog"),
+    tillBtn: document.querySelector("#tillBtn"),
+    closeTillBtn: document.querySelector("#closeTillBtn"),
+    cashTillBalance: document.querySelector("#cashTillBalance"),
+    cardTillBalance: document.querySelector("#cardTillBalance"),
+    tillCollectionForm: document.querySelector("#tillCollectionForm"),
+    tillCollectionMethod: document.querySelector("#tillCollectionMethod"),
+    tillCollectionAmount: document.querySelector("#tillCollectionAmount"),
+    tillCollectionNote: document.querySelector("#tillCollectionNote"),
+    tillReportMonth: document.querySelector("#tillReportMonth"),
+    downloadTillReportBtn: document.querySelector("#downloadTillReportBtn"),
+    tillCollectionsList: document.querySelector("#tillCollectionsList"),
     customersDialog: document.querySelector("#customersDialog"),
     customersBtn: document.querySelector("#customersBtn"),
     closeCustomersBtn: document.querySelector("#closeCustomersBtn"),
@@ -140,6 +159,7 @@
     staffPinInput: document.querySelector("#staffPinInput"),
     recoveryPinInput: document.querySelector("#recoveryPinInput"),
     footerInput: document.querySelector("#footerInput"),
+    downloadBackupBtn: document.querySelector("#downloadBackupBtn"),
     shiftClock: document.querySelector("#shiftClock"),
     shiftSales: document.querySelector("#shiftSales"),
     transactionCount: document.querySelector("#transactionCount"),
@@ -183,8 +203,19 @@
     });
   }
 
+  function itemTime(item) {
+    return Date.parse(item?.updatedAt || item?.voidedAt || item?.deletedAt || item?.date || "") || 0;
+  }
+
   function mergeList(newerList, olderList) {
-    return uniqueById([...(Array.isArray(newerList) ? newerList : []), ...(Array.isArray(olderList) ? olderList : [])]);
+    const merged = new Map();
+    [...(Array.isArray(olderList) ? olderList : []), ...(Array.isArray(newerList) ? newerList : [])].forEach((item) => {
+      if (!item) return;
+      const key = item.id || JSON.stringify(item);
+      const current = merged.get(key);
+      if (!current || itemTime(item) >= itemTime(current)) merged.set(key, item);
+    });
+    return Array.from(merged.values()).sort((a, b) => itemTime(b) - itemTime(a));
   }
 
   function pickValue(primaryValue, secondaryValue, fallback) {
@@ -203,10 +234,13 @@
     const newer = firstTime >= secondTime ? first : second;
     const older = newer === first ? second : first;
     const latestTime = Math.max(firstTime, secondTime);
+    const deletedPayments = uniqueById([...(newer["truck-pos-deleted-payments"] || []), ...(older["truck-pos-deleted-payments"] || [])]);
     return {
       "truck-pos-products": pickValue(newer["truck-pos-products"], older["truck-pos-products"], defaultProducts),
       "truck-pos-transactions": mergeList(newer["truck-pos-transactions"], older["truck-pos-transactions"]),
-      "truck-pos-payments": mergeList(newer["truck-pos-payments"], older["truck-pos-payments"]),
+      "truck-pos-payments": mergeList(newer["truck-pos-payments"], older["truck-pos-payments"]).filter((payment) => !deletedPayments.includes(payment.id)),
+      "truck-pos-deleted-payments": deletedPayments,
+      "truck-pos-collections": mergeList(newer["truck-pos-collections"], older["truck-pos-collections"]),
       "truck-pos-customers": mergeList(newer["truck-pos-customers"], older["truck-pos-customers"]),
       "truck-pos-settings": pickValue(newer["truck-pos-settings"], older["truck-pos-settings"], {}),
       "truck-pos-meta": {
@@ -237,10 +271,17 @@
       "truck-pos-products": state.products,
       "truck-pos-transactions": state.transactions,
       "truck-pos-payments": state.payments,
+      "truck-pos-deleted-payments": state.deletedPaymentIds,
+      "truck-pos-collections": state.collections,
       "truck-pos-customers": state.customers,
       "truck-pos-settings": state.settings,
       "truck-pos-meta": state.meta
     };
+  }
+
+  function saveDataLocally(data) {
+    Object.entries(data).forEach(([key, value]) => save(key, value));
+    save("truck-pos-backup", data);
   }
 
   function canSaveToServer() {
@@ -249,16 +290,20 @@
 
   async function saveAll() {
     const data = currentData();
-    Object.entries(data).forEach(([key, value]) => save(key, value));
-    save("truck-pos-backup", data);
+    saveDataLocally(data);
     if (canSaveToServer()) {
       const response = await fetch("/api/data", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(state.sessionToken ? { Authorization: `Bearer ${state.sessionToken}` } : {})
+        },
         body: JSON.stringify(data),
         keepalive: true
       });
-      if (!response.ok) throw new Error("Could not save data to the server.");
+      const result = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(result?.error || "Could not save data to the server.");
+      if (result?.data) applySnapshot(result.data, true);
     }
     return true;
   }
@@ -268,8 +313,73 @@
       await saveAll();
       return true;
     } catch (error) {
-      window.alert(message || "This change could not be saved yet. Please try again.");
+      window.alert(error.message || message || "This change could not be saved yet. Please try again.");
       return false;
+    }
+  }
+
+  function applySnapshot(snapshot, preferServer = false) {
+    const localData = currentData();
+    const merged = mergeSnapshots(snapshot, localData);
+    const source = preferServer ? (snapshot || {}) : merged;
+    state.products = migrateProducts(source["truck-pos-products"] || merged["truck-pos-products"] || defaultProducts);
+    state.transactions = merged["truck-pos-transactions"] || [];
+    state.payments = merged["truck-pos-payments"] || [];
+    state.deletedPaymentIds = merged["truck-pos-deleted-payments"] || [];
+    state.collections = merged["truck-pos-collections"] || [];
+    state.customers = migrateCustomers(source["truck-pos-customers"] || merged["truck-pos-customers"] || defaultCustomers);
+    state.settings = {
+      storeName: "Truck Stop POS",
+      currency: "R",
+      footer: "Drive safe. Thank you.",
+      taxRate: 15,
+      adminPin: "1234",
+      staffPin: "0000",
+      recoveryPin: "9999",
+      ...(source["truck-pos-settings"] || merged["truck-pos-settings"] || {})
+    };
+    state.meta = source["truck-pos-meta"] || merged["truck-pos-meta"] || { lastSavedAt: null };
+    saveDataLocally(currentData());
+  }
+
+  function renderOpenAdminPanels() {
+    if (els.historyDialog.open) renderHistory();
+    if (els.tillDialog.open) renderTill();
+    if (els.paymentsDialog.open) renderPayments();
+    if (els.statementsDialog.open) renderStatementSelectors();
+    if (els.customersDialog.open) renderCustomers();
+    if (els.inventoryDialog.open) renderInventory();
+  }
+
+  function renderLiveSync() {
+    renderTabs();
+    renderCustomersForSale();
+    renderProducts();
+    renderMetrics();
+    tickClock();
+    if (!state.cart.length) renderCart();
+    else renderCartTotals();
+    renderOpenAdminPanels();
+  }
+
+  async function refreshFromServer(renderAfter = false) {
+    if (!canSaveToServer() || !state.sessionToken || state.syncing) return false;
+    state.syncing = true;
+    try {
+      const response = await fetch(`/api/data?sync=${Date.now()}`, {
+        cache: "no-store",
+        headers: state.sessionToken ? { Authorization: `Bearer ${state.sessionToken}` } : {}
+      });
+      if (!response.ok) throw new Error("Could not load latest server data.");
+      applySnapshot(await response.json(), true);
+      if (renderAfter) {
+        renderLiveSync();
+      }
+      return true;
+    } catch (error) {
+      return false;
+    } finally {
+      state.syncing = false;
     }
   }
 
@@ -330,7 +440,7 @@
 
   function allowedPaymentMethods(customer) {
     if (!customer) return [];
-    return customer.type === "account" ? ["Account"] : ["Cash", "Card", "Fleet"];
+    return customer.type === "account" ? ["Account"] : ["Cash", "Card"];
   }
 
   function applyRole() {
@@ -340,22 +450,54 @@
     document.body.classList.toggle("is-admin", isAdmin);
   }
 
-  function login(role) {
+  async function serverLogin(pin, recovery = false) {
+    const response = await fetch("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin, recovery })
+    });
+    const result = await response.json().catch(() => null);
+    if (!response.ok || !result?.ok) throw new Error(result?.error || "Incorrect PIN.");
+    return result;
+  }
+
+  function login(role, token, data) {
     state.currentUser = role;
+    state.sessionToken = token || "";
+    if (state.sessionToken) sessionStorage.setItem("truck-pos-session-token", state.sessionToken);
+    if (data) applySnapshot(data, true);
     els.loginScreen.classList.add("hidden");
     els.appShell.classList.remove("hidden");
     applyRole();
     renderAll();
+    startLiveSync();
   }
 
   function logout() {
+    stopLiveSync();
     state.currentUser = null;
+    state.sessionToken = "";
+    sessionStorage.removeItem("truck-pos-session-token");
     state.cart = [];
     state.selectedCustomerId = "";
     els.pinInput.value = "";
     els.appShell.classList.add("hidden");
     els.loginScreen.classList.remove("hidden");
     renderCart();
+  }
+
+  function startLiveSync() {
+    stopLiveSync();
+    if (!state.sessionToken) return;
+    state.syncTimer = window.setInterval(() => {
+      void refreshFromServer(true);
+    }, 7000);
+    void refreshFromServer(true);
+  }
+
+  function stopLiveSync() {
+    if (state.syncTimer) window.clearInterval(state.syncTimer);
+    state.syncTimer = null;
   }
 
   function renderTabs() {
@@ -380,7 +522,7 @@
       els.saleRuleMessage.textContent = "Select a customer before completing the sale.";
       return;
     }
-    els.saleRuleMessage.textContent = customer.type === "account" ? "Account customer: only Account payment is allowed." : "Prepaid customer: Cash, Card, or Fleet only.";
+    els.saleRuleMessage.textContent = customer.type === "account" ? "Account customer: only Account payment is allowed." : "Prepaid customer: Cash or Card only.";
   }
 
   function renderCustomersForSale() {
@@ -425,7 +567,13 @@
   function setQty(productId, qty) {
     const line = state.cart.find((item) => item.id === productId);
     if (!line) return;
-    line.qty = qty === "" ? "" : Math.max(0, Number(qty));
+    if (qty === "") {
+      line.qty = "";
+      return;
+    }
+    const value = Number(qty);
+    if (!Number.isFinite(value)) return;
+    line.qty = Math.max(0, value);
   }
 
   function updateQty(productId, delta) {
@@ -467,7 +615,7 @@
           <div class="cart-detail">${line.qty || 0} ${escapeHtml(line.unit)} x ${money(line.price)} ${line.taxable ? "incl. VAT calc" : "no VAT"}</div>
           <label class="fuel-liters-control">
             <span>${line.category === "Fuel" ? "Liters" : "Qty"}</span>
-            <input data-qty="${line.id}" type="number" min="0" step="${line.category === "Fuel" ? "0.1" : "1"}" value="${line.qty}" placeholder="Type amount" />
+            <input data-qty="${line.id}" type="number" min="0" step="${line.category === "Fuel" ? "0.01" : "1"}" inputmode="${line.category === "Fuel" ? "decimal" : "numeric"}" value="${line.qty}" placeholder="Type amount" />
           </label>
         </div>
         <div>
@@ -483,7 +631,6 @@
     setQty(productId, input.value);
     const line = state.cart.find((item) => item.id === productId);
     if (!line) return renderCart();
-    input.value = line.qty;
     const totalEl = els.cartLines.querySelector(`[data-line-total="${productId}"]`);
     if (totalEl) totalEl.textContent = money(Number(line.qty || 0) * line.price);
     renderCartCount();
@@ -564,6 +711,169 @@
         <div>${transaction.lines.map((line) => `${line.qty} ${line.unit} ${escapeHtml(line.name)}`).join(", ")}</div>
         ${transaction.status === "void" ? `<div class="muted">Void reason: ${escapeHtml(transaction.voidReason || "")}</div>` : `<div class="record-actions"><button class="danger-button" data-void-sale="${transaction.id}" type="button">Void Sale</button></div>`}
       </div>`).join("") : '<div class="empty-state">No transactions for this selection.</div>';
+  }
+
+  function tillBalance(method) {
+    const sales = state.transactions
+      .filter((transaction) => transaction.status !== "void" && transaction.paymentMethod === method)
+      .reduce((sum, transaction) => sum + Number(transaction.totals.total || 0), 0);
+    const collected = state.collections
+      .filter((collection) => collection.method === method)
+      .reduce((sum, collection) => sum + Number(collection.amount || 0), 0);
+    return sales - collected;
+  }
+
+  function currentTillBalance() {
+    return {
+      Cash: tillBalance("Cash"),
+      Card: tillBalance("Card")
+    };
+  }
+
+  function setTillDefaultAmount() {
+    const balances = currentTillBalance();
+    const amount = Math.max(0, balances[els.tillCollectionMethod.value] || 0);
+    els.tillCollectionAmount.value = amount ? amount.toFixed(2) : "";
+  }
+
+  function renderTill() {
+    const balances = currentTillBalance();
+    els.cashTillBalance.textContent = money(balances.Cash);
+    els.cardTillBalance.textContent = money(balances.Card);
+    if (!els.tillReportMonth.value) els.tillReportMonth.value = new Date().toISOString().slice(0, 7);
+    setTillDefaultAmount();
+    els.tillCollectionsList.innerHTML = state.collections.length ? state.collections.map((collection) => `
+      <div class="record">
+        <div class="record-top"><span>${escapeHtml(collection.method)} collection</span><span>${money(collection.amount)}</span></div>
+        <div class="muted">${new Date(collection.date).toLocaleString()} - ${escapeHtml(collection.userRole || "admin")}</div>
+        <div>${escapeHtml(collection.note || "")}</div>
+      </div>`).join("") : '<div class="empty-state">No collections recorded yet.</div>';
+  }
+
+  async function addTillCollection() {
+    await refreshFromServer();
+    const method = els.tillCollectionMethod.value;
+    const amount = Number(els.tillCollectionAmount.value || 0);
+    if (!["Cash", "Card"].includes(method) || amount <= 0) return;
+    const available = currentTillBalance()[method] || 0;
+    if (amount > available + 0.005) {
+      window.alert(`${method} collection blocked. Available ${method.toLowerCase()} balance is ${money(Math.max(0, available))}.`);
+      renderTill();
+      return;
+    }
+    const collection = {
+      id: uid("T"),
+      type: "collection",
+      date: new Date().toISOString(),
+      method,
+      amount,
+      note: els.tillCollectionNote.value.trim(),
+      userRole: state.currentUser
+    };
+    state.collections.unshift(collection);
+    els.tillCollectionForm.reset();
+    if (!(await persistChange("Till collection was not saved. Please try again."))) {
+      state.collections = state.collections.filter((item) => item.id !== collection.id);
+      return;
+    }
+    renderTill();
+  }
+
+  function monthRange(monthValue) {
+    const value = monthValue || new Date().toISOString().slice(0, 7);
+    const [year, month] = value.split("-").map(Number);
+    const start = new Date(year, month - 1, 1);
+    const end = new Date(year, month, 1);
+    return { value, start, end, label: start.toLocaleString(undefined, { month: "long", year: "numeric" }) };
+  }
+
+  function tillEvents() {
+    const sales = state.transactions
+      .filter((transaction) => transaction.status !== "void" && ["Cash", "Card"].includes(transaction.paymentMethod))
+      .map((transaction) => ({
+        date: transaction.date,
+        type: "Sale",
+        method: transaction.paymentMethod,
+        ref: transaction.id,
+        description: transaction.customerName,
+        amount: Number(transaction.totals.total || 0)
+      }));
+    const collections = state.collections.map((collection) => ({
+      date: collection.date,
+      type: "Collection",
+      method: collection.method,
+      ref: collection.id,
+      description: collection.note || "",
+      amount: -Number(collection.amount || 0)
+    }));
+    return sales.concat(collections).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  }
+
+  function tillReportRows(monthValue) {
+    const range = monthRange(monthValue);
+    const rows = [
+      ["Till Monthly Report", range.label],
+      ["Store", state.settings.storeName],
+      ["Generated", new Date().toLocaleString()],
+      [],
+      ["Summary", "Cash", "Card", "Total"]
+    ];
+    let openingCash = 0;
+    let openingCard = 0;
+    let cashBalance = 0;
+    let cardBalance = 0;
+    const events = tillEvents();
+    events.forEach((event) => {
+      const date = new Date(event.date);
+      if (date < range.start) {
+        if (event.method === "Cash") openingCash += event.amount;
+        if (event.method === "Card") openingCard += event.amount;
+      }
+    });
+    cashBalance = openingCash;
+    cardBalance = openingCard;
+    const monthlyEvents = events.filter((event) => {
+      const date = new Date(event.date);
+      return date >= range.start && date < range.end;
+    });
+    const monthCashIn = monthlyEvents.filter((event) => event.method === "Cash" && event.amount > 0).reduce((sum, event) => sum + event.amount, 0);
+    const monthCardIn = monthlyEvents.filter((event) => event.method === "Card" && event.amount > 0).reduce((sum, event) => sum + event.amount, 0);
+    const monthCashOut = monthlyEvents.filter((event) => event.method === "Cash" && event.amount < 0).reduce((sum, event) => sum + Math.abs(event.amount), 0);
+    const monthCardOut = monthlyEvents.filter((event) => event.method === "Card" && event.amount < 0).reduce((sum, event) => sum + Math.abs(event.amount), 0);
+    rows.push(
+      ["Opening Balance", openingCash, openingCard, openingCash + openingCard],
+      ["Sales Captured", monthCashIn, monthCardIn, monthCashIn + monthCardIn],
+      ["Collections / Settlements", monthCashOut, monthCardOut, monthCashOut + monthCardOut],
+      ["Closing Balance", openingCash + monthCashIn - monthCashOut, openingCard + monthCardIn - monthCardOut, openingCash + openingCard + monthCashIn + monthCardIn - monthCashOut - monthCardOut],
+      [],
+      ["Date", "Type", "Method", "Reference", "Customer / Notes", "Cash In", "Cash Out", "Cash Balance", "Card In", "Card Out", "Card Balance"]
+    );
+    monthlyEvents.forEach((event) => {
+      const isCash = event.method === "Cash";
+      const isIn = event.amount > 0;
+      if (isCash) cashBalance += event.amount;
+      else cardBalance += event.amount;
+      rows.push([
+        new Date(event.date).toLocaleString(),
+        event.type,
+        event.method,
+        event.ref,
+        event.description,
+        isCash && isIn ? event.amount : "",
+        isCash && !isIn ? Math.abs(event.amount) : "",
+        cashBalance,
+        !isCash && isIn ? event.amount : "",
+        !isCash && !isIn ? Math.abs(event.amount) : "",
+        cardBalance
+      ]);
+    });
+    return { rows, range };
+  }
+
+  function downloadTillReport() {
+    const report = tillReportRows(els.tillReportMonth.value);
+    const workbook = toExcelWorkbook(report.rows, `Till Report ${report.range.label}`);
+    downloadBlob(workbook, `till-report-${report.range.value}.xls`, "application/vnd.ms-excel");
   }
 
   async function voidSale(id) {
@@ -719,6 +1029,13 @@
     downloadBlob(workbook, `sales-history-${label}-${today}.xls`, "application/vnd.ms-excel");
   }
 
+  async function downloadFullBackup() {
+    await refreshFromServer();
+    const data = currentData();
+    const stamp = new Date().toISOString().replaceAll(":", "-").slice(0, 19);
+    downloadBlob(JSON.stringify(data, null, 2), `truck-stop-pos-backup-${stamp}.json`, "application/json");
+  }
+
   function statementRows(statement) {
     return [["Date", "Description", "Reference", "Debit", "Credit", "Balance"]].concat(statement.rows.map((row) => [
       row.date ? new Date(row.date).toLocaleDateString() : "",
@@ -826,6 +1143,9 @@
         <div class="record-top"><span>${escapeHtml(payment.customerName)}</span><span>${money(payment.amount)}</span></div>
         <div class="muted">${new Date(payment.date).toLocaleString()} - ${escapeHtml(payment.method)} - ${escapeHtml(payment.reference || "")}</div>
         <div>${escapeHtml(payment.notes || "")}</div>
+        <div class="record-actions">
+          <button class="danger-button" data-delete-payment="${payment.id}" type="button">Delete Payment</button>
+        </div>
       </div>`).join("") : '<div class="empty-state">No payments loaded yet.</div>';
   }
 
@@ -851,6 +1171,23 @@
       return;
     }
     renderPayments();
+  }
+
+  async function deletePayment(id) {
+    const payment = state.payments.find((item) => item.id === id);
+    if (!payment) return;
+    if (!window.confirm(`Delete payment for ${payment.customerName} - ${money(payment.amount)}?`)) return;
+    const previousPayments = state.payments.slice();
+    const previousDeletedPaymentIds = state.deletedPaymentIds.slice();
+    state.payments = state.payments.filter((item) => item.id !== id);
+    state.deletedPaymentIds = uniqueById([...state.deletedPaymentIds, id]);
+    if (!(await persistChange("Payment deletion was not saved. Please try again."))) {
+      state.payments = previousPayments;
+      state.deletedPaymentIds = previousDeletedPaymentIds;
+      return;
+    }
+    renderPayments();
+    renderStatement();
   }
 
   function renderInventory() {
@@ -981,17 +1318,27 @@
   }
 
   function bindEvents() {
-    els.loginForm.addEventListener("submit", (event) => {
+    els.loginForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       const pin = els.pinInput.value.trim();
-      if (pin === state.settings.adminPin) login("admin");
-      else if (pin === state.settings.staffPin) login("staff");
-      else els.loginMessage.textContent = "Incorrect PIN.";
+      els.loginMessage.textContent = "";
+      try {
+        const result = await serverLogin(pin);
+        login(result.role, result.token, result.data);
+      } catch (error) {
+        els.loginMessage.textContent = error.message || "Incorrect PIN.";
+      }
     });
-    els.recoveryBtn.addEventListener("click", () => {
+    els.recoveryBtn.addEventListener("click", async () => {
       const pin = window.prompt("Enter recovery PIN");
-      if (pin === state.settings.recoveryPin) login("admin");
-      else els.loginMessage.textContent = "Incorrect recovery PIN.";
+      if (!pin) return;
+      els.loginMessage.textContent = "";
+      try {
+        const result = await serverLogin(pin, true);
+        login(result.role, result.token, result.data);
+      } catch (error) {
+        els.loginMessage.textContent = error.message || "Incorrect recovery PIN.";
+      }
     });
     els.logoutBtn.addEventListener("click", logout);
     els.categoryTabs.addEventListener("click", (event) => {
@@ -1046,7 +1393,8 @@
       els.receiptDialog.close();
       resetSale();
     });
-    els.historyBtn.addEventListener("click", () => {
+    els.historyBtn.addEventListener("click", async () => {
+      await refreshFromServer();
       renderHistory();
       els.historyDialog.showModal();
     });
@@ -1057,6 +1405,22 @@
     els.historyList.addEventListener("click", (event) => {
       const button = event.target.closest("[data-void-sale]");
       if (button) void voidSale(button.dataset.voidSale);
+    });
+    els.tillBtn.addEventListener("click", async () => {
+      await refreshFromServer();
+      renderTill();
+      els.tillDialog.showModal();
+    });
+    els.closeTillBtn.addEventListener("click", () => els.tillDialog.close());
+    els.tillCollectionMethod.addEventListener("change", setTillDefaultAmount);
+    els.downloadTillReportBtn.addEventListener("click", async () => {
+      await refreshFromServer();
+      renderTill();
+      downloadTillReport();
+    });
+    els.tillCollectionForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void addTillCollection();
     });
     els.customersBtn.addEventListener("click", () => {
       renderCustomers();
@@ -1076,7 +1440,8 @@
       const button = event.target.closest("[data-delete-customer]");
       if (button) void removeCustomer(button.dataset.deleteCustomer);
     });
-    els.paymentsBtn.addEventListener("click", () => {
+    els.paymentsBtn.addEventListener("click", async () => {
+      await refreshFromServer();
       renderPayments();
       els.paymentsDialog.showModal();
     });
@@ -1085,7 +1450,12 @@
       event.preventDefault();
       void addPayment();
     });
-    els.statementsBtn.addEventListener("click", () => {
+    els.paymentsList.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-delete-payment]");
+      if (button) void deletePayment(button.dataset.deletePayment);
+    });
+    els.statementsBtn.addEventListener("click", async () => {
+      await refreshFromServer();
       renderStatementSelectors();
       els.statementsDialog.showModal();
     });
@@ -1116,6 +1486,9 @@
       els.settingsDialog.showModal();
     });
     els.closeSettingsBtn.addEventListener("click", () => els.settingsDialog.close());
+    els.downloadBackupBtn.addEventListener("click", () => {
+      void downloadFullBackup();
+    });
     els.settingsForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       const previous = { ...state.settings };
@@ -1136,27 +1509,31 @@
   }
 
   function init() {
-    let normalized = false;
     if (!state.settings.currency || state.settings.currency === "$") {
       state.settings.currency = "R";
-      normalized = true;
     }
     bindEvents();
     renderAll();
     tickClock();
     setInterval(tickClock, 30000);
     els.pinInput.focus();
-    if (normalized) void saveAll().catch(() => {});
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) void refreshFromServer(true);
+    });
+    window.addEventListener("focus", () => {
+      void refreshFromServer(true);
+    });
     window.addEventListener("beforeunload", () => {
       const data = currentData();
       try {
         localStorage.setItem("truck-pos-backup", JSON.stringify(data));
       } catch (error) {}
-      if (canSaveToServer() && navigator.sendBeacon) {
-        navigator.sendBeacon("/api/data", new Blob([JSON.stringify(data)], { type: "application/json" }));
+      if (canSaveToServer() && navigator.sendBeacon && state.sessionToken) {
+        navigator.sendBeacon("/api/data", new Blob([JSON.stringify({ token: state.sessionToken, data })], { type: "application/json" }));
       }
     });
   }
 
   init();
 })();
+
