@@ -554,7 +554,7 @@
     if (existing) {
       existing.qty = Number(existing.qty || 0) + 1;
     } else {
-      state.cart.push({ id: product.id, name: product.name, category: product.category, price: product.price, unit: product.unit, taxable: product.taxable, qty: "" });
+      state.cart.push({ id: product.id, name: product.name, category: product.category, price: product.price, unit: product.unit, taxable: product.taxable, qty: "", registration: "" });
     }
     renderCart();
     const input = els.cartLines.querySelector(`[data-qty="${productId}"]`);
@@ -618,6 +618,11 @@
             <span>${line.category === "Fuel" ? "Liters" : "Qty"}</span>
             <input data-qty="${line.id}" type="text" inputmode="${line.category === "Fuel" ? "decimal" : "numeric"}" pattern="${line.category === "Fuel" ? "[0-9]*[,.]?[0-9]*" : "[0-9]*"}" value="${line.qty}" placeholder="Type amount" />
           </label>
+          ${line.category === "Fuel" ? `
+            <label class="fuel-liters-control">
+              <span>Registration</span>
+              <input data-registration="${line.id}" type="text" value="${escapeHtml(line.registration || "")}" maxlength="20" autocomplete="off" autocapitalize="characters" placeholder="Type registration" />
+            </label>` : ""}
         </div>
         <div>
           <strong data-line-total="${line.id}">${money(Number(line.qty || 0) * line.price)}</strong>
@@ -636,6 +641,13 @@
     if (totalEl) totalEl.textContent = money(Number(line.qty || 0) * line.price);
     renderCartCount();
     renderCartTotals();
+  }
+
+  function updateRegistration(input) {
+    const line = state.cart.find((item) => item.id === input.dataset.registration);
+    if (!line) return;
+    input.value = input.value.toUpperCase();
+    line.registration = input.value;
   }
 
   function receipt(transaction) {
@@ -673,7 +685,11 @@
       customerName: customer.name,
       customerType: customer.type,
       paymentMethod: state.paymentMethod,
-      lines: state.cart.map((line) => ({ ...line, qty: Number(line.qty) })),
+      lines: state.cart.map((line) => ({
+        ...line,
+        qty: Number(line.qty),
+        registration: line.category === "Fuel" ? String(line.registration || "").trim().toUpperCase() : ""
+      })),
       totals: currentTotals
     };
     state.transactions.unshift(transaction);
@@ -709,7 +725,7 @@
       <div class="record ${transaction.status === "void" ? "void-record" : ""}">
         <div class="record-top"><span>${transaction.id}</span><span>${money(transaction.totals.total)}</span></div>
         <div class="muted">${new Date(transaction.date).toLocaleString()} - ${escapeHtml(transaction.customerName)} - ${transaction.paymentMethod} - ${transaction.status}</div>
-        <div>${transaction.lines.map((line) => `${line.qty} ${line.unit} ${escapeHtml(line.name)}`).join(", ")}</div>
+        <div>${transaction.lines.map((line) => `${line.qty} ${line.unit} ${escapeHtml(line.name)}${line.category === "Fuel" && line.registration ? ` - Reg: ${escapeHtml(line.registration)}` : ""}`).join(", ")}</div>
         ${transaction.status === "void" ? `<div class="muted">Void reason: ${escapeHtml(transaction.voidReason || "")}</div>` : `<div class="record-actions"><button class="danger-button" data-void-sale="${transaction.id}" type="button">Void Sale</button></div>`}
       </div>`).join("") : '<div class="empty-state">No transactions for this selection.</div>';
   }
@@ -904,7 +920,7 @@
   }
 
   function historyRows(transactions) {
-    const rows = [["Sale ID", "Date", "Status", "Customer", "Customer Type", "Payment Method", "User Role", "Item", "Category", "Qty", "Unit", "Unit Price", "Line Total", "VAT Item", "Sale Subtotal", "Sale VAT", "Sale Total", "Void Reason", "Voided At", "Voided By"]];
+    const rows = [["Sale ID", "Date", "Status", "Customer", "Customer Type", "Payment Method", "User Role", "Item", "Category", "Qty", "Unit", "Litres", "Registration", "Unit Price", "Line Total", "VAT Item", "Sale Subtotal", "Sale VAT", "Sale Total", "Void Reason", "Voided At", "Voided By"]];
     transactions.forEach((transaction) => {
       transaction.lines.forEach((line) => {
         rows.push([
@@ -919,6 +935,8 @@
           line.category,
           line.qty,
           line.unit,
+          line.category === "Fuel" ? Number(line.qty || 0) : "",
+          line.category === "Fuel" ? line.registration || "" : "",
           line.price,
           Number(line.qty || 0) * Number(line.price || 0),
           line.taxable ? "Yes" : "No",
@@ -934,21 +952,34 @@
     return rows;
   }
 
+  function saleFuelDetails(sale) {
+    const fuelLines = (sale.lines || []).filter((line) => line.category === "Fuel");
+    const litres = fuelLines.reduce((sum, line) => sum + Number(line.qty || 0), 0);
+    const registrations = [...new Set(fuelLines.map((line) => String(line.registration || "").trim()).filter(Boolean))];
+    return {
+      litres: litres || "",
+      registration: registrations.join(", ")
+    };
+  }
+
   function ledgerFor(customerId, fromDate, toDate) {
     const customer = state.customers.find((item) => item.id === customerId);
     if (!customer) return { customer: null, rows: [], closing: 0 };
-    const rows = [{ date: "", description: "Opening balance", debit: Number(customer.openingBalance || 0), credit: 0, ref: "" }];
+    const rows = [{ date: "", description: "Opening balance", litres: "", registration: "", debit: Number(customer.openingBalance || 0), credit: 0, ref: "" }];
     state.transactions.filter((sale) => sale.customerId === customerId && sale.paymentMethod === "Account").forEach((sale) => {
+      const fuel = saleFuelDetails(sale);
       rows.push({
         date: sale.date,
         description: sale.status === "void" ? `VOID ${sale.id}` : `Sale ${sale.id}`,
+        litres: fuel.litres,
+        registration: fuel.registration,
         debit: sale.status === "void" ? 0 : sale.totals.total,
         credit: 0,
         ref: sale.id
       });
     });
     state.payments.filter((payment) => payment.customerId === customerId).forEach((payment) => {
-      rows.push({ date: payment.date, description: `Payment ${payment.method}`, debit: 0, credit: payment.amount, ref: payment.reference || payment.id });
+      rows.push({ date: payment.date, description: `Payment ${payment.method}`, litres: "", registration: "", debit: 0, credit: payment.amount, ref: payment.reference || payment.id });
     });
     rows.sort((a, b) => String(a.date).localeCompare(String(b.date)));
     let balance = 0;
@@ -969,13 +1000,15 @@
         <h2>${escapeHtml(state.settings.storeName)}</h2>
         <p><strong>Statement for:</strong> ${escapeHtml(statement.customer.name)}</p>
         <table>
-          <thead><tr><th>Date</th><th>Description</th><th>Ref</th><th>Debit</th><th>Credit</th><th>Balance</th></tr></thead>
+          <thead><tr><th>Date</th><th>Description</th><th>Ref</th><th>Litres</th><th>Registration</th><th>Debit</th><th>Credit</th><th>Balance</th></tr></thead>
           <tbody>
             ${statement.rows.map((row) => `
               <tr>
                 <td>${row.date ? new Date(row.date).toLocaleDateString() : ""}</td>
                 <td>${escapeHtml(row.description)}</td>
                 <td>${escapeHtml(row.ref)}</td>
+                <td>${row.litres || ""}</td>
+                <td>${escapeHtml(row.registration || "")}</td>
                 <td>${row.debit ? money(row.debit) : ""}</td>
                 <td>${row.credit ? money(row.credit) : ""}</td>
                 <td>${money(row.balance)}</td>
@@ -1038,10 +1071,12 @@
   }
 
   function statementRows(statement) {
-    return [["Date", "Description", "Reference", "Debit", "Credit", "Balance"]].concat(statement.rows.map((row) => [
+    return [["Date", "Description", "Reference", "Litres", "Registration", "Debit", "Credit", "Balance"]].concat(statement.rows.map((row) => [
       row.date ? new Date(row.date).toLocaleDateString() : "",
       row.description,
       row.ref,
+      row.litres || "",
+      row.registration || "",
       row.debit || "",
       row.credit || "",
       row.balance
@@ -1374,6 +1409,8 @@
     els.cartLines.addEventListener("input", (event) => {
       const input = event.target.closest("[data-qty]");
       if (input) updateManualQty(input);
+      const registrationInput = event.target.closest("[data-registration]");
+      if (registrationInput) updateRegistration(registrationInput);
     });
     els.searchInput.addEventListener("input", (event) => {
       state.search = event.target.value;
